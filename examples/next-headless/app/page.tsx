@@ -7,16 +7,6 @@ import { useLobbyside, type LobbysideWidgetState } from "@lobbyside/react";
 const DEFAULT_WIDGET_ID = process.env.NEXT_PUBLIC_EXAMPLE_WIDGET_ID ?? "REPLACE_ME";
 const BASE_URL = process.env.NEXT_PUBLIC_EXAMPLE_BASE_URL ?? "http://localhost:3000";
 
-/** Pick a readable text color given a hex bg (naive luminance check). */
-function textOn(bg: string | null | undefined): string {
-  if (!bg || !bg.startsWith("#") || bg.length < 7) return "#111";
-  const r = parseInt(bg.slice(1, 3), 16);
-  const g = parseInt(bg.slice(3, 5), 16);
-  const b = parseInt(bg.slice(5, 7), 16);
-  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  return luminance > 0.6 ? "#111" : "#f5f5f5";
-}
-
 /** Stringify the widget state, skipping the joinCall function. */
 function widgetToJson(widget: LobbysideWidgetState): string {
   return JSON.stringify(
@@ -30,12 +20,7 @@ export default function Page() {
   const [widgetId, setWidgetId] = useState(DEFAULT_WIDGET_ID);
   const widget = useLobbyside(widgetId, { baseUrl: BASE_URL });
 
-  const cardBg = widget.status === "online" ? widget.customBgColor ?? "#ffffff" : "#ffffff";
-  const cardText = widget.status === "online" ? textOn(widget.customBgColor) : "#111";
-  const buttonBg = widget.status === "online" ? widget.customAccentColor ?? "#111" : "#111";
-  const buttonText = textOn(
-    widget.status === "online" ? widget.customAccentColor ?? "#111" : "#111",
-  );
+  const hasIdentity = widget.status === "offline" || widget.status === "online";
 
   return (
     <main style={{ padding: 32, maxWidth: 640, margin: "40px auto" }}>
@@ -75,21 +60,17 @@ export default function Page() {
 
       {widget.status === "loading" && <p>Loading…</p>}
 
-      {widget.status === "offline" && (
-        <p>The host has their widget toggled off right now.</p>
-      )}
-
       {widget.status === "error" && (
         <p style={{ color: "crimson" }}>
           Error ({widget.error.code}): {widget.error.message}
         </p>
       )}
 
-      {widget.status === "online" && (
+      {hasIdentity && (
         <div
           style={{
-            background: cardBg,
-            color: cardText,
+            background: "#fff",
+            color: "#111",
             border: "1px solid #ddd",
             borderRadius: 12,
             padding: 16,
@@ -97,6 +78,7 @@ export default function Page() {
             display: "flex",
             flexDirection: "column",
             gap: 10,
+            opacity: widget.status === "offline" ? 0.75 : 1,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -122,29 +104,37 @@ export default function Page() {
 
           <p>{widget.ctaText}</p>
 
-          <button
-            disabled={widget.isQueueFull}
-            onClick={async () => {
-              try {
-                const { entryUrl } = await widget.joinCall({
-                  visitor: { name: "Demo Visitor", email: "demo@example.com" },
-                });
-                window.open(entryUrl, "_blank");
-              } catch (err) {
-                alert(`${(err as { code: string }).code}: ${(err as Error).message}`);
-              }
-            }}
-            style={{
-              padding: "10px 16px",
-              borderRadius: 8,
-              border: "none",
-              background: widget.isQueueFull ? "#ccc" : buttonBg,
-              color: widget.isQueueFull ? "#666" : buttonText,
-              cursor: widget.isQueueFull ? "not-allowed" : "pointer",
-            }}
-          >
-            {widget.isQueueFull ? "Queue is full" : widget.buttonText}
-          </button>
+          {widget.status === "online" ? (
+            <button
+              disabled={widget.isQueueFull}
+              onClick={async () => {
+                try {
+                  const { entryUrl } = await widget.joinCall({
+                    visitor: { name: "Demo Visitor", email: "demo@example.com" },
+                  });
+                  window.open(entryUrl, "_blank");
+                } catch (err) {
+                  alert(
+                    `${(err as { code: string }).code}: ${(err as Error).message}`,
+                  );
+                }
+              }}
+              style={{
+                padding: "10px 16px",
+                borderRadius: 8,
+                border: "none",
+                background: widget.isQueueFull ? "#ccc" : "#111",
+                color: widget.isQueueFull ? "#666" : "#fff",
+                cursor: widget.isQueueFull ? "not-allowed" : "pointer",
+              }}
+            >
+              {widget.isQueueFull ? "Queue is full" : widget.buttonText}
+            </button>
+          ) : (
+            <p style={{ opacity: 0.6, fontSize: 14, fontStyle: "italic" }}>
+              Currently offline — check back later.
+            </p>
+          )}
         </div>
       )}
 

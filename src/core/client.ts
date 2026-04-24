@@ -8,33 +8,38 @@ import {
 import { LobbysideError } from "./errors";
 
 /**
+ * Identity + copy fields the host configured. Available on both
+ * `offline` and `online` states so you can still render "Sarup is
+ * currently offline" with the avatar and host name, not just a blank
+ * placeholder. Theming, meetLink, slug, and maxQueueSize are
+ * deliberately not surfaced — consumers rendering their own UI bring
+ * their own design tokens, and the internal plumbing (slug, queue
+ * limits, fallback URL) is only used by joinCall under the hood.
+ */
+export interface WidgetIdentity {
+  hostName: string;
+  hostTitle: string;
+  avatarUrl: string;
+  ctaText: string;
+  buttonText: string;
+}
+
+/**
  * Public state machine surfaced by useLobbyside. Discriminated by
- * `status` so consumers can't accidentally read `hostName` in the
- * loading state.
+ * `status`. Narrow on `status === "online"` before calling joinCall
+ * or reading isQueueFull.
  */
 export type LobbysideWidgetState =
   | { status: "loading" }
   | { status: "error"; error: LobbysideError }
-  | { status: "offline" }
-  | {
+  | (WidgetIdentity & { status: "offline" })
+  | (WidgetIdentity & {
       status: "online";
-      hostName: string;
-      hostTitle: string;
-      avatarUrl: string;
-      ctaText: string;
-      buttonText: string;
       isQueueFull: boolean;
       joinCall: (args?: {
         visitor?: Record<string, string>;
       }) => Promise<{ entryUrl: string }>;
-      meetLink: string;
-      slug: string;
-      theme?: string;
-      customBgColor?: string | null;
-      customAccentColor?: string | null;
-      boldFont?: string | null;
-      maxQueueSize: number;
-    };
+    });
 
 export interface LobbysideClient {
   getState(): LobbysideWidgetState;
@@ -65,6 +70,8 @@ export function createLobbysideClient(
   let state: LobbysideWidgetState = { status: "loading" };
   let initial: WidgetConfigResponse | null = null;
   let liveConfig: ReturnType<typeof normalizeConfig> = undefined;
+  // slug is kept in closure — joinCall needs it to build the POST body,
+  // but consumers don't need to see it (internal plumbing).
   let liveSlug: string | undefined = undefined;
   let queuedCount = 0;
   let unsubscribe: (() => void) | null = null;
@@ -86,33 +93,30 @@ export function createLobbysideClient(
     // Merge HTTP snapshot + live subscription data.
     const config = liveConfig ?? initial?.displayData;
     const active = liveConfig?.isActive ?? initial?.active;
-    if (initial == null) {
+    if (initial == null || !config) {
       state = { status: "loading" };
       return;
     }
-    if (!active || !config) {
-      state = { status: "offline" };
-      return;
-    }
 
-    const maxQueueSize = config.maxQueueSize ?? 5;
-    const isQueueFull = queuedCount >= maxQueueSize;
-    const slug = liveSlug ?? initial.displayData.slug;
-
-    state = {
-      status: "online",
+    const identity: WidgetIdentity = {
       hostName: config.hostName ?? "",
       hostTitle: config.hostTitle ?? "",
       avatarUrl: config.avatarUrl ?? "",
       ctaText: config.ctaText ?? "",
       buttonText: config.buttonText ?? "",
-      meetLink: config.meetLink ?? "",
-      slug,
-      theme: config.theme,
-      customBgColor: config.customBgColor,
-      customAccentColor: config.customAccentColor,
-      boldFont: config.boldFont,
-      maxQueueSize,
+    };
+
+    if (!active) {
+      state = { status: "offline", ...identity };
+      return;
+    }
+
+    const maxQueueSize = config.maxQueueSize ?? 5;
+    const isQueueFull = queuedCount >= maxQueueSize;
+
+    state = {
+      status: "online",
+      ...identity,
       isQueueFull,
       joinCall,
     };
@@ -134,7 +138,7 @@ export function createLobbysideClient(
       throw new LobbysideError("QUEUE_FULL", "Queue is full.");
     }
 
-    const slug = state.slug;
+    const slug = liveSlug ?? initial?.displayData.slug ?? "";
     let res: Response;
     try {
       res = await fetch(`${baseUrl}/api/queue-entries`, {
