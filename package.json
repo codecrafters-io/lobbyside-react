@@ -1,0 +1,50 @@
+{
+  "name": "@lobbyside/react",
+  "version": "0.1.0",
+  "description": "React hook for embedding a custom Lobbyside widget UI in your app.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codecrafters-io/lobbyside-react.git"
+  },
+  "homepage": "https://github.com/codecrafters-io/lobbyside-react#readme",
+  "bugs": "https://github.com/codecrafters-io/lobbyside-react/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "peerDependencies": {
+    "@instantdb/core": ">=1.0.0",
+    "react": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@instantdb/core": "^1.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0"
+  }
+}
