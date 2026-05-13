@@ -1,6 +1,9 @@
 # @lobbyside/react
 
-Render your own custom widget UI against a live [Lobbyside](https://lobbyside.com) widget. This package gives you the host's identity (name, title, avatar, copy) plus a live queue state and a join action — you bring the UI.
+Render your own custom widget UI against a live [Lobbyside](https://lobbyside.com) widget. Two hooks:
+
+- `useLobbyside` — host identity, online/offline + queue state, and a `joinCall` action for the "Join 1:1" CTA.
+- `useLobbysideIncomingCall` — make a visitor reachable from the host's Live tab; ring on incoming calls and offer `accept` / `decline`.
 
 If you just want a drop-in widget with our default look, use the script-tag install instead.
 
@@ -92,10 +95,96 @@ Keys recognized by the server today: `name`, `email`, `company`, `github`. Whate
 - `NOT_FOUND` — the widget ID doesn't exist.
 - `NETWORK` — anything else (fetch rejection, unexpected HTTP status, malformed JSON).
 
+## Incoming calls (`useLobbysideIncomingCall`)
+
+Lets a visitor receive calls dialled from the host's Live tab — the inbound side of the queue. Mount the hook anywhere on the visitor-facing page; it publishes presence + opens the invite room. When the host rings, the state flips to `ringing` and you render Accept/Decline however you like.
+
+```tsx
+import { useLobbysideIncomingCall } from '@lobbyside/react';
+
+export function CallBanner() {
+  const incoming = useLobbysideIncomingCall('YOUR_WIDGET_ID', {
+    visitor: { name: 'Ada Lovelace', email: 'ada@example.com' },
+  });
+
+  if (incoming.status !== 'ringing') return null;
+
+  return (
+    <div role="dialog" aria-label="Incoming call">
+      <p><strong>{incoming.call.hostName}</strong> is calling</p>
+      <button
+        onClick={() => {
+          // Both calls MUST stay synchronous — see "iOS popup blocker" below.
+          const { callUrl } = incoming.call.accept();
+          window.open(callUrl, '_blank');
+        }}
+      >
+        Accept
+      </button>
+      <button onClick={() => incoming.call.decline()}>Decline</button>
+    </div>
+  );
+}
+```
+
+### Return value
+
+| `status` | Fields |
+|---|---|
+| `idle` | _(none)_ |
+| `ringing` | `call: { callId, hostName, hostAvatar, widgetName, sentAt, accept(), decline() }` |
+
+### Options
+
+| Option | Type | Notes |
+|---|---|---|
+| `baseUrl` | `string` | Defaults to `https://lobbyside.com`. |
+| `visitor` | `{ name?, email?, company?, linkedin?, github? }` | Published to the host's Live tab so they can see who you are before they dial, and pre-filled into the call form on accept. Safe to update across renders. |
+| `ringTimeoutMs` | `number` | Auto-decline (with reason `timeout`) after this many ms. Defaults to `30000`. |
+
+### iOS Safari popup blocker
+
+iOS only honors `window.open` when it's called *synchronously* from a user gesture. `accept()` is intentionally synchronous (no `await`, no Promise) so you can chain it directly:
+
+```tsx
+// GOOD — both calls are sync, gesture survives.
+onClick={() => {
+  const { callUrl } = incoming.call.accept();
+  window.open(callUrl, '_blank');
+}}
+
+// BAD — the await drops the gesture; iOS silently swallows the popup.
+onClick={async () => {
+  const { callUrl } = await somethingAsync();
+  window.open(callUrl, '_blank');
+}}
+```
+
+If you'd rather navigate in-tab, do `window.location.href = callUrl` instead — same rule still applies.
+
+### Headless audio
+
+`@lobbyside/react` doesn't play a ringtone — bring your own if you want one. A simple pattern:
+
+```tsx
+useEffect(() => {
+  if (incoming.status !== 'ringing') return;
+  const a = new Audio('/your-ringtone.mp3');
+  a.loop = true;
+  a.play().catch(() => {});
+  return () => { a.pause(); };
+}, [incoming.status]);
+```
+
+### Pairing with `useLobbyside`
+
+Both hooks share the underlying InstantDB connection — mounting both for the same `widgetId` is cheap. Use `useLobbyside` to render the "Join 1:1" CTA, and `useLobbysideIncomingCall` to handle the inbound case where the host dials you instead.
+
 ## Self-hosted or local dev
 
 Point at a different origin with the `baseUrl` option:
 
 ```tsx
 useLobbyside('YOUR_WIDGET_ID', { baseUrl: 'http://localhost:3000' });
+useLobbysideIncomingCall('YOUR_WIDGET_ID', { baseUrl: 'http://localhost:3000' });
 ```

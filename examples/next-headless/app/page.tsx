@@ -1,24 +1,35 @@
 "use client";
 
 import { useState } from "react";
-import { useLobbyside, type LobbysideWidgetState } from "@lobbyside/react";
+import {
+  useLobbyside,
+  useLobbysideIncomingCall,
+  type LobbysideWidgetState,
+  type LobbysideIncomingCallState,
+} from "@lobbyside/react";
 
-// Initial widget ID from env. User can change it via the form field.
 const DEFAULT_WIDGET_ID = process.env.NEXT_PUBLIC_EXAMPLE_WIDGET_ID ?? "REPLACE_ME";
 const BASE_URL = process.env.NEXT_PUBLIC_EXAMPLE_BASE_URL ?? "http://localhost:3000";
 
-/** Stringify the widget state, skipping the joinCall function. */
-function widgetToJson(widget: LobbysideWidgetState): string {
+function stateToJson(
+  state: LobbysideWidgetState | LobbysideIncomingCallState,
+): string {
   return JSON.stringify(
-    widget,
-    (key, value) => (typeof value === "function" ? "[Function]" : value),
+    state,
+    (_key, value) => (typeof value === "function" ? "[Function]" : value),
     2,
   );
 }
 
 export default function Page() {
   const [widgetId, setWidgetId] = useState(DEFAULT_WIDGET_ID);
+  const [visitorName, setVisitorName] = useState("Demo Visitor");
+  const [visitorEmail, setVisitorEmail] = useState("demo@example.com");
   const widget = useLobbyside(widgetId, { baseUrl: BASE_URL });
+  const incoming = useLobbysideIncomingCall(widgetId, {
+    baseUrl: BASE_URL,
+    visitor: { name: visitorName, email: visitorEmail },
+  });
 
   const hasIdentity = widget.status === "offline" || widget.status === "online";
 
@@ -54,9 +65,98 @@ export default function Page() {
         />
       </label>
 
+      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+        <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: "#666" }}>
+          Visitor name
+          <input
+            type="text"
+            value={visitorName}
+            onChange={(e) => setVisitorName(e.target.value)}
+            style={{ padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, color: "#111", background: "#fff" }}
+          />
+        </label>
+        <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: "#666" }}>
+          Visitor email
+          <input
+            type="email"
+            value={visitorEmail}
+            onChange={(e) => setVisitorEmail(e.target.value)}
+            style={{ padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, color: "#111", background: "#fff" }}
+          />
+        </label>
+      </div>
+
       <p style={{ color: "#666" }}>
         status: <strong>{widget.status}</strong>
+        {" | "}
+        ring: <strong>{incoming.status}</strong>
       </p>
+
+      {incoming.status === "ringing" && (
+        <div
+          style={{
+            background: "#fffbe6",
+            border: "1px solid #f1c40f",
+            borderRadius: 12,
+            padding: 16,
+            width: 360,
+            marginBottom: 16,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {incoming.call.hostAvatar && (
+              <img
+                src={incoming.call.hostAvatar}
+                alt={incoming.call.hostName}
+                referrerPolicy="no-referrer"
+                style={{ width: 40, height: 40, borderRadius: "50%" }}
+              />
+            )}
+            <div style={{ color: "#111" }}>
+              <strong>{incoming.call.hostName}</strong> is calling
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => {
+                if (incoming.status !== "ringing") return;
+                const { callUrl } = incoming.call.accept();
+                window.open(callUrl, "_blank");
+              }}
+              style={{
+                flex: 1,
+                padding: "10px 16px",
+                borderRadius: 8,
+                border: "none",
+                background: "#16a34a",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => {
+                if (incoming.status === "ringing") incoming.call.decline();
+              }}
+              style={{
+                flex: 1,
+                padding: "10px 16px",
+                borderRadius: 8,
+                border: "none",
+                background: "#dc2626",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              Decline
+            </button>
+          </div>
+        </div>
+      )}
 
       {widget.status === "loading" && <p>Loading…</p>}
 
@@ -110,7 +210,7 @@ export default function Page() {
               onClick={async () => {
                 try {
                   const { entryUrl } = await widget.joinCall({
-                    visitor: { name: "Demo Visitor", email: "demo@example.com" },
+                    visitor: { name: visitorName, email: visitorEmail },
                   });
                   window.open(entryUrl, "_blank");
                 } catch (err) {
@@ -138,24 +238,30 @@ export default function Page() {
         </div>
       )}
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#666" }}>
-          Hook state
-        </h2>
-        <pre
-          style={{
-            background: "#f4f4f4",
-            color: "#111",
-            padding: 16,
-            borderRadius: 8,
-            fontSize: 12,
-            lineHeight: 1.5,
-            overflow: "auto",
-          }}
-        >
-          {widgetToJson(widget)}
-        </pre>
+      <section style={{ marginTop: 32, display: "grid", gap: 16 }}>
+        <div>
+          <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#666" }}>
+            useLobbyside state
+          </h2>
+          <pre style={preStyle}>{stateToJson(widget)}</pre>
+        </div>
+        <div>
+          <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#666" }}>
+            useLobbysideIncomingCall state
+          </h2>
+          <pre style={preStyle}>{stateToJson(incoming)}</pre>
+        </div>
       </section>
     </main>
   );
 }
+
+const preStyle: React.CSSProperties = {
+  background: "#f4f4f4",
+  color: "#111",
+  padding: 16,
+  borderRadius: 8,
+  fontSize: 12,
+  lineHeight: 1.5,
+  overflow: "auto",
+};
