@@ -178,7 +178,61 @@ useEffect(() => {
 
 ### Pairing with `useLobbyside`
 
-Both hooks share the underlying InstantDB connection — mounting both for the same `widgetId` is cheap. Use `useLobbyside` to render the "Join 1:1" CTA, and `useLobbysideIncomingCall` to handle the inbound case where the host dials you instead.
+Both hooks share the underlying InstantDB connection — mounting both for the same `widgetId` is cheap. Use `useLobbyside` to render the "Join 1:1" CTA, and `useLobbysideIncomingCall` to handle the inbound case where the host dials you instead. A typical full widget looks like:
+
+```tsx
+import { useLobbyside, useLobbysideIncomingCall } from '@lobbyside/react';
+
+export function LobbysideWidget() {
+  const widget = useLobbyside('YOUR_WIDGET_ID');
+  const incoming = useLobbysideIncomingCall('YOUR_WIDGET_ID', {
+    visitor: { name: 'Ada Lovelace', email: 'ada@example.com' },
+  });
+
+  if (incoming.status === 'ringing') {
+    return (
+      <div role="dialog" aria-label="Incoming call">
+        <p><strong>{incoming.call.hostName}</strong> is calling</p>
+        <button
+          onClick={() => {
+            const { callUrl } = incoming.call.accept();
+            window.open(callUrl, '_blank');
+          }}
+        >
+          Accept
+        </button>
+        <button onClick={() => incoming.call.decline()}>Decline</button>
+      </div>
+    );
+  }
+
+  if (widget.status === 'loading' || widget.status === 'error') return null;
+
+  return (
+    <div>
+      <img src={widget.avatarUrl} alt={widget.hostName} />
+      <h3>{widget.hostName}</h3>
+      {widget.status === 'online' ? (
+        <button
+          disabled={widget.isQueueFull}
+          onClick={async () => {
+            const { entryUrl } = await widget.joinCall({
+              visitor: { name: 'Ada Lovelace', email: 'ada@example.com' },
+            });
+            window.open(entryUrl, '_blank');
+          }}
+        >
+          {widget.isQueueFull ? 'Queue is full' : widget.buttonText}
+        </button>
+      ) : (
+        <p>Currently offline — check back later</p>
+      )}
+    </div>
+  );
+}
+```
+
+The ringing branch takes priority so an inbound call surfaces even while the visitor is mid-interaction with the CTA.
 
 ## Self-hosted or local dev
 
