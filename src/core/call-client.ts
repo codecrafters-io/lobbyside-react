@@ -104,8 +104,11 @@ function buildInitialPresence(
     sessionStartedAt: now,
     referrer,
     visitedPaths: [{ path, title, enteredAt: now }],
-    ...(visitor?.name ? { visitorName: visitor.name } : {}),
-    ...(visitor?.email ? { visitorEmail: visitor.email } : {}),
+    // Always present, even when empty, so `setVisitor` updates stay shape-
+    // compatible with the initial join (`""` and missing both fall back to
+    // anonymous on the host via `visitorLabel`).
+    visitorName: visitor?.name ?? "",
+    visitorEmail: visitor?.email ?? "",
   };
 }
 
@@ -293,9 +296,6 @@ export function createLobbysideIncomingCallClient(
     .then((config) => {
       if (destroyed) return;
       attachRooms(config);
-      if (destroyed) {
-        teardownRooms();
-      }
     })
     .catch(() => {
       // Soft-fail: the consumer's idle state is unchanged. They can

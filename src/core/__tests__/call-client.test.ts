@@ -293,6 +293,36 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(presence).toEqual([{ visitorName: "New", visitorEmail: "n@e.co" }]);
   });
 
+  it("initial presence and setVisitor publishes use the same visitor field shape (Bugbot regression)", async () => {
+    const { db, rooms, calls } = makeFakeDb();
+    (fetchWidgetConfig as Mock).mockResolvedValue({
+      active: true,
+      instantAppId: APP_ID,
+      displayData: { slug: "test-slug" },
+    });
+    (getInstantClient as Mock).mockReturnValue(db);
+
+    const client = createLobbysideIncomingCallClient(WIDGET_ID, {
+      baseUrl: "http://localhost:3000",
+      // No visitor — initial presence still needs the fields, just empty.
+    });
+    await flushMicrotasks();
+
+    const initial = calls.find((c) => c.type === "widgetVisitors")
+      ?.initialPresence as Record<string, unknown>;
+    expect(initial).toMatchObject({
+      visitorName: "",
+      visitorEmail: "",
+    });
+
+    client.setVisitor(undefined);
+    const update = rooms[`widgetVisitors:${WIDGET_ID}`].publishedPresence[0];
+    expect(Object.keys(update).sort()).toEqual(
+      ["visitorEmail", "visitorName"].sort(),
+    );
+    expect(update).toEqual({ visitorName: "", visitorEmail: "" });
+  });
+
   it("subscribeTopic failure does not strand the invite room handle (Bugbot regression)", async () => {
     const { db, rooms } = makeFakeDb();
     const origJoinRoom = db.joinRoom.bind(db);
@@ -431,9 +461,9 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(Number.isFinite(state.call.sentAt)).toBe(true);
   });
 
-  it("destroy during pending config fetch tears down whatever rooms were attached after resolution", async () => {
-    // Simulate: destroy() lands before fetchWidgetConfig resolves.
+  it("destroy before config resolves prevents any room from being joined", async () => {
     const { db, rooms } = makeFakeDb();
+    const joinRoomSpy = vi.spyOn(db, "joinRoom");
     let resolve: ((value: unknown) => void) | undefined;
     (fetchWidgetConfig as Mock).mockReturnValue(
       new Promise((r) => {
@@ -454,12 +484,8 @@ describe("createLobbysideIncomingCallClient", () => {
     });
     await flushMicrotasks();
 
-    // attachRooms runs after config resolves, but the post-attach destroyed
-    // check tears them down — assert leftRoom flips to true for whichever
-    // rooms got attached.
-    for (const room of Object.values(rooms)) {
-      expect(room.leftRoom).toBe(true);
-    }
+    expect(joinRoomSpy).not.toHaveBeenCalled();
+    expect(Object.keys(rooms)).toEqual([]);
   });
 
   it("decline after timeout is a no-op (already idle)", async () => {
