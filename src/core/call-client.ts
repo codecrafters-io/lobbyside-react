@@ -223,7 +223,7 @@ export function createLobbysideIncomingCallClient(
         hostName: invite.hostName ?? "",
         hostAvatar: invite.hostAvatar ?? "",
         widgetName: invite.widgetName ?? "",
-        sentAt: invite.sentAt,
+        sentAt: typeof invite.sentAt === "number" ? invite.sentAt : Date.now(),
         accept: () => acceptCurrent(invite),
         decline: () => declineCurrent(invite),
       },
@@ -239,6 +239,18 @@ export function createLobbysideIncomingCallClient(
   function handleInvite(payload: unknown): void {
     if (!isPlainInvitePayload(payload)) return;
     if (payload.widgetId && payload.widgetId !== widgetId) return;
+    // Rare: a second host dials us while the first is still ringing. Send a
+    // decline for the previous so its call row doesn't sit stuck till timeout.
+    if (state.status === "ringing" && state.call.callId !== payload.callId) {
+      const prevCallId = state.call.callId;
+      try {
+        inviteRoom?.publishTopic("declined", {
+          callId: prevCallId,
+          reason: "superseded",
+        });
+      } catch {}
+      mirrorDeclineRest(baseUrl, prevCallId, tabId);
+    }
     startRinging(payload);
   }
 
@@ -323,6 +335,19 @@ export function createLobbysideIncomingCallClient(
     },
     destroy() {
       destroyed = true;
+      // Decline before tearing down so the host's call row transitions even
+      // when destroy fires from a page unload. keepalive:true on the REST
+      // mirror covers that case where the WS publish can't flush in time.
+      if (state.status === "ringing") {
+        const callId = state.call.callId;
+        try {
+          inviteRoom?.publishTopic("declined", {
+            callId,
+            reason: "unmount",
+          });
+        } catch {}
+        mirrorDeclineRest(baseUrl, callId, tabId);
+      }
       clearRingTimer();
       teardownRooms();
       listeners.clear();

@@ -306,6 +306,99 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(visitorRoom.leftRoom).toBe(true);
   });
 
+  it("destroy while ringing declines the active invite (Bugbot regression)", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    ctx.fireInvite(makeInvite());
+    expect(ctx.client.getState().status).toBe("ringing");
+
+    ctx.client.destroy();
+
+    const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
+    expect(inviteRoom.publishedTopics).toEqual([
+      { topic: "declined", payload: { callId: "call-1", reason: "unmount" } },
+    ]);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://localhost:3000/api/calls/call-1/decline",
+      expect.objectContaining({ method: "POST", keepalive: true }),
+    );
+  });
+
+  it("destroy while idle does not publish anything", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    ctx.client.destroy();
+
+    const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
+    expect(inviteRoom.publishedTopics).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("new invite while ringing declines the previous one (Bugbot regression)", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    ctx.fireInvite(makeInvite({ callId: "call-1" }));
+    ctx.fireInvite(makeInvite({ callId: "call-2" }));
+
+    const state = ctx.client.getState();
+    if (state.status !== "ringing") throw new Error("expected ringing");
+    expect(state.call.callId).toBe("call-2");
+
+    const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
+    expect(inviteRoom.publishedTopics).toEqual([
+      { topic: "declined", payload: { callId: "call-1", reason: "superseded" } },
+    ]);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://localhost:3000/api/calls/call-1/decline",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("re-invite of the same callId restarts the ring timer without declining (Bugbot regression)", async () => {
+    const ctx = await bootClient({ ringTimeoutMs: 1000 });
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    ctx.fireInvite(makeInvite());
+    vi.advanceTimersByTime(800);
+    ctx.fireInvite(makeInvite());
+
+    const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
+    expect(inviteRoom.publishedTopics).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(500);
+    expect(ctx.client.getState().status).toBe("ringing");
+  });
+
+  it("invite missing sentAt falls back to Date.now() (Bugbot regression)", async () => {
+    const ctx = await bootClient();
+    const before = Date.now();
+    ctx.fireInvite(makeInvite({ sentAt: undefined }));
+    const after = Date.now();
+
+    const state = ctx.client.getState();
+    if (state.status !== "ringing") throw new Error("expected ringing");
+    expect(typeof state.call.sentAt).toBe("number");
+    expect(state.call.sentAt).toBeGreaterThanOrEqual(before);
+    expect(state.call.sentAt).toBeLessThanOrEqual(after);
+  });
+
+  it("invite with non-numeric sentAt falls back to Date.now()", async () => {
+    const ctx = await bootClient();
+    ctx.fireInvite(makeInvite({ sentAt: "not-a-number" as unknown as number }));
+    const state = ctx.client.getState();
+    if (state.status !== "ringing") throw new Error("expected ringing");
+    expect(typeof state.call.sentAt).toBe("number");
+    expect(Number.isFinite(state.call.sentAt)).toBe(true);
+  });
+
   it("destroy during pending config fetch tears down whatever rooms were attached after resolution", async () => {
     // Simulate: destroy() lands before fetchWidgetConfig resolves.
     const { db, rooms } = makeFakeDb();
