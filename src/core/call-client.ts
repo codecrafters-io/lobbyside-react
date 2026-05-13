@@ -275,11 +275,18 @@ export function createLobbysideIncomingCallClient(
       inviteRoom = db.joinRoom("visitorInvites", tabId, {
         initialPresence: { kind: "visitor" },
       });
-      unsubInvite = inviteRoom.subscribeTopic("invite", handleInvite);
-      unsubCancelled = inviteRoom.subscribeTopic("cancelled", handleCancelled);
     } catch {
       inviteRoom = null;
     }
+    if (!inviteRoom) return;
+    // Subscribe attempts are isolated so a throw on one topic doesn't strand
+    // the room handle — teardownRooms still needs to call leaveRoom on it.
+    try {
+      unsubInvite = inviteRoom.subscribeTopic("invite", handleInvite);
+    } catch {}
+    try {
+      unsubCancelled = inviteRoom.subscribeTopic("cancelled", handleCancelled);
+    } catch {}
   }
 
   fetchWidgetConfig(widgetId, baseUrl)

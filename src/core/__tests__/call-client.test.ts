@@ -293,6 +293,38 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(presence).toEqual([{ visitorName: "New", visitorEmail: "n@e.co" }]);
   });
 
+  it("subscribeTopic failure does not strand the invite room handle (Bugbot regression)", async () => {
+    const { db, rooms } = makeFakeDb();
+    const origJoinRoom = db.joinRoom.bind(db);
+    db.joinRoom = (type, id, opts) => {
+      const room = origJoinRoom(type, id, opts);
+      if (type === "visitorInvites") {
+        return {
+          ...room,
+          subscribeTopic() {
+            throw new Error("simulated transport error");
+          },
+        };
+      }
+      return room;
+    };
+    (fetchWidgetConfig as Mock).mockResolvedValue({
+      active: true,
+      instantAppId: APP_ID,
+      displayData: { slug: "test-slug" },
+    });
+    (getInstantClient as Mock).mockReturnValue(db);
+
+    const client = createLobbysideIncomingCallClient(WIDGET_ID, {
+      baseUrl: "http://localhost:3000",
+    });
+    await flushMicrotasks();
+    client.destroy();
+
+    const inviteRoom = rooms[`visitorInvites:${tabId()}`];
+    expect(inviteRoom.leftRoom).toBe(true);
+  });
+
   it("destroy unsubscribes topics and leaves both rooms", async () => {
     const ctx = await bootClient();
     const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
