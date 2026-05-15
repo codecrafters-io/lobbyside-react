@@ -42,8 +42,12 @@ export function MyCTA() {
         >
           {widget.isQueueFull ? 'Queue is full' : widget.buttonText}
         </button>
+      ) : widget.offlineCtaUrl ? (
+        <a href={widget.offlineCtaUrl} target="_blank" rel="noreferrer">
+          {widget.offlineButtonText || 'Book a time'}
+        </a>
       ) : (
-        <p>Currently offline — check back later</p>
+        <p>Currently offline. Check back later.</p>
       )}
     </div>
   );
@@ -75,6 +79,32 @@ export function MyCTA() {
 |---|---|---|
 | `isQueueFull` | `boolean` | Live — flips to `true` when the configured queue size is reached. |
 | `joinCall(args?)` | `() => Promise<{ entryUrl: string }>` | POSTs to Lobbyside. Open `entryUrl` in a new tab on success. |
+
+### Offline-only fields
+
+When the host has the widget paused, you'll get a backup link (e.g. Cal.com / Calendly) the visitor can click instead of waiting in queue. All three are `""` when the host hasn't configured them — branch on `offlineCtaUrl` to decide whether to render a button at all.
+
+| Field | Type | Notes |
+|---|---|---|
+| `offlineCtaUrl` | `string` | Booking link to open. Empty string when the host left it blank — render nothing. |
+| `offlineCtaText` | `string` | Optional message shown above the booking button (e.g. "Out fishing, back tomorrow."). |
+| `offlineButtonText` | `string` | Optional button label. Falls back to your own copy when empty. |
+
+```tsx
+if (widget.status === 'offline') {
+  if (!widget.offlineCtaUrl) {
+    return <p>{widget.hostName} is currently offline. Check back later.</p>;
+  }
+  return (
+    <div>
+      <p>{widget.offlineCtaText || `${widget.hostName} is offline.`}</p>
+      <a href={widget.offlineCtaUrl} target="_blank" rel="noreferrer">
+        {widget.offlineButtonText || 'Book a time'}
+      </a>
+    </div>
+  );
+}
+```
 
 ### Passing visitor data
 
@@ -224,8 +254,12 @@ export function LobbysideWidget() {
         >
           {widget.isQueueFull ? 'Queue is full' : widget.buttonText}
         </button>
+      ) : widget.offlineCtaUrl ? (
+        <a href={widget.offlineCtaUrl} target="_blank" rel="noreferrer">
+          {widget.offlineButtonText || 'Book a time'}
+        </a>
       ) : (
-        <p>Currently offline — check back later</p>
+        <p>Currently offline. Check back later.</p>
       )}
     </div>
   );

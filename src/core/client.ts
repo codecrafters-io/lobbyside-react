@@ -14,7 +14,7 @@ import { LobbysideError } from "./errors";
  * placeholder. Theming, meetLink, slug, and maxQueueSize are
  * deliberately not surfaced — consumers rendering their own UI bring
  * their own design tokens, and the internal plumbing (slug, queue
- * limits, fallback URL) is only used by joinCall under the hood.
+ * limits) is only used by joinCall under the hood.
  */
 export interface WidgetIdentity {
   hostName: string;
@@ -25,6 +25,21 @@ export interface WidgetIdentity {
 }
 
 /**
+ * Offline fallback surface — only meaningful when the host is offline,
+ * so it's exposed only on the `offline` state. All three fields are
+ * empty strings when the host hasn't configured them; render a backup
+ * link by checking `offlineCtaUrl !== ""`.
+ */
+export interface OfflineFallback {
+  /** Booking link the visitor should open when the host is offline. */
+  offlineCtaUrl: string;
+  /** Optional message shown above the booking button (e.g. "Out fishing, back tomorrow."). */
+  offlineCtaText: string;
+  /** Optional button label. Defaults to "Book a time" in the canonical widget. */
+  offlineButtonText: string;
+}
+
+/**
  * Public state machine surfaced by useLobbyside. Discriminated by
  * `status`. Narrow on `status === "online"` before calling joinCall
  * or reading isQueueFull.
@@ -32,7 +47,7 @@ export interface WidgetIdentity {
 export type LobbysideWidgetState =
   | { status: "loading" }
   | { status: "error"; error: LobbysideError }
-  | (WidgetIdentity & { status: "offline" })
+  | (WidgetIdentity & OfflineFallback & { status: "offline" })
   | (WidgetIdentity & {
       status: "online";
       isQueueFull: boolean;
@@ -107,7 +122,12 @@ export function createLobbysideClient(
     };
 
     if (!active) {
-      state = { status: "offline", ...identity };
+      const offline: OfflineFallback = {
+        offlineCtaUrl: config.offlineCtaUrl ?? "",
+        offlineCtaText: config.offlineCtaText ?? "",
+        offlineButtonText: config.offlineButtonText ?? "",
+      };
+      state = { status: "offline", ...identity, ...offline };
       return;
     }
 
