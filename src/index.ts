@@ -1,6 +1,10 @@
 export { useLobbyside } from "./hook";
 export type { UseLobbysideOptions } from "./hook";
-export type { LobbysideWidgetState, WidgetIdentity } from "./core/client";
+export type {
+  LobbysideWidgetState,
+  OfflineFallback,
+  WidgetIdentity,
+} from "./core/client";
 
 export { useLobbysideIncomingCall } from "./call-hook";
 export type { UseLobbysideIncomingCallOptions } from "./call-hook";

@@ -35,6 +35,9 @@ export interface WidgetConfigResponse {
     formGithubMode?: string;
     boldFont?: string | null;
     maxQueueSize?: number;
+    offlineCtaUrl?: string;
+    offlineCtaText?: string;
+    offlineButtonText?: string;
   };
 }
 

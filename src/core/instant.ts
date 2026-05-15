@@ -32,6 +32,9 @@ export interface SubscribedWidgetConfig {
   customAccentColor?: string | null;
   boldFont?: string | null;
   maxQueueSize?: number;
+  offlineCtaUrl?: string;
+  offlineCtaText?: string;
+  offlineButtonText?: string;
 }
 
 export interface SubscribedWidget {

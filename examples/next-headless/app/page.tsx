@@ -230,9 +230,32 @@ export default function Page() {
             >
               {widget.isQueueFull ? "Queue is full" : widget.buttonText}
             </button>
+          ) : widget.offlineCtaUrl ? (
+            <>
+              {widget.offlineCtaText && (
+                <p style={{ opacity: 0.7, fontSize: 14 }}>
+                  {widget.offlineCtaText}
+                </p>
+              )}
+              <a
+                href={widget.offlineCtaUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  background: "#111",
+                  color: "#fff",
+                  textAlign: "center",
+                  textDecoration: "none",
+                }}
+              >
+                {widget.offlineButtonText || "Book a time"}
+              </a>
+            </>
           ) : (
             <p style={{ opacity: 0.6, fontSize: 14, fontStyle: "italic" }}>
-              Currently offline — check back later.
+              Currently offline. Check back later.
             </p>
           )}
         </div>
