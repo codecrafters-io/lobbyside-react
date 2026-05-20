@@ -12,11 +12,15 @@ import {
 vi.mock("../core/config", () => ({
   fetchWidgetConfig: vi.fn(),
 }));
+vi.mock("../core/org-config", () => ({
+  fetchOrgConfig: vi.fn(),
+}));
 vi.mock("../core/instant", () => ({
   getInstantClient: vi.fn(),
 }));
 
 import { fetchWidgetConfig } from "../core/config";
+import { fetchOrgConfig } from "../core/org-config";
 import { getInstantClient } from "../core/instant";
 import { useLobbysideIncomingCall } from "../call-hook";
 
@@ -25,6 +29,9 @@ const APP_ID = "app-xyz";
 
 interface FakeRoom {
   topics: Map<string, (event: unknown) => void>;
+  presenceSubscribers: ((slice: {
+    peers?: Record<string, Record<string, unknown>>;
+  }) => void)[];
   publishedTopics: { topic: string; payload: unknown }[];
   publishedPresence: Record<string, unknown>[];
   leftRoom: boolean;
@@ -33,6 +40,13 @@ interface FakeRoom {
 function makeFakeDb() {
   const rooms: Record<string, FakeRoom> = {};
   const db = {
+    // `subscribeQuery` is only used by the org-mode call-client (to watch
+    // which widget is currently live). Widget-mode tests don't trigger
+    // it; we accept the call and return a no-op unsubscribe so it stays
+    // out of the way of existing assertions.
+    subscribeQuery() {
+      return () => undefined;
+    },
     joinRoom(
       type: string,
       id: string,
@@ -40,6 +54,7 @@ function makeFakeDb() {
     ) {
       const room: FakeRoom = {
         topics: new Map(),
+        presenceSubscribers: [],
         publishedTopics: [],
         publishedPresence: [],
         leftRoom: false,
@@ -50,6 +65,19 @@ function makeFakeDb() {
           room.topics.set(name, cb);
           return () => {
             if (room.topics.get(name) === cb) room.topics.delete(name);
+          };
+        },
+        subscribePresence(
+          _opts: unknown,
+          cb: (slice: {
+            peers?: Record<string, Record<string, unknown>>;
+          }) => void,
+        ) {
+          room.presenceSubscribers.push(cb);
+          cb({ peers: {} });
+          return () => {
+            const i = room.presenceSubscribers.indexOf(cb);
+            if (i >= 0) room.presenceSubscribers.splice(i, 1);
           };
         },
         publishTopic(name: string, payload: unknown) {
@@ -75,6 +103,7 @@ async function flushMicrotasks(): Promise<void> {
 beforeEach(() => {
   sessionStorage.clear();
   (fetchWidgetConfig as Mock).mockReset();
+  (fetchOrgConfig as Mock).mockReset();
   (getInstantClient as Mock).mockReset();
 });
 
@@ -170,7 +199,8 @@ describe("useLobbysideIncomingCall", () => {
     });
 
     unmount();
-    expect(rooms[`widgetVisitors:${WIDGET_ID}`].leftRoom).toBe(true);
+    // Per-tab room id matches the script-tag bundle — see visitor-rooms.ts.
+    expect(rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`].leftRoom).toBe(true);
     expect(rooms[`visitorInvites:${tabId()}`].leftRoom).toBe(true);
   });
 
@@ -211,7 +241,8 @@ describe("useLobbysideIncomingCall", () => {
       await flushMicrotasks();
     });
 
-    const presence = rooms[`widgetVisitors:${WIDGET_ID}`].publishedPresence;
+    const presence =
+      rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`].publishedPresence;
     expect(presence).toContainEqual({
       visitorName: "Updated",
       visitorEmail: "",
@@ -256,5 +287,80 @@ describe("useLobbysideIncomingCall", () => {
     });
 
     expect(result.current.status).toBe("idle");
+  });
+});
+
+describe("useLobbysideIncomingCall — options-object form", () => {
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("stays idle and console.errors when both widgetId and orgId are passed", async () => {
+    const { result } = renderHook(() =>
+      useLobbysideIncomingCall({
+        widgetId: WIDGET_ID,
+        orgId: "org-1",
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(result.current.status).toBe("idle");
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "pass either { widgetId } or { orgId }, not both",
+      ),
+    );
+    // No client constructed → no fetch on either path.
+    expect(fetchWidgetConfig as Mock).not.toHaveBeenCalled();
+    expect(fetchOrgConfig as Mock).not.toHaveBeenCalled();
+  });
+
+  it("dispatches to widget mode when only widgetId is in the options object", async () => {
+    setupOk();
+    renderHook(() =>
+      useLobbysideIncomingCall({ widgetId: WIDGET_ID }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(fetchWidgetConfig as Mock).toHaveBeenCalledWith(
+      WIDGET_ID,
+      expect.any(String),
+    );
+    expect(fetchOrgConfig as Mock).not.toHaveBeenCalled();
+  });
+
+  it("dispatches to org mode when only orgId is in the options object", async () => {
+    const { db } = makeFakeDb();
+    (fetchOrgConfig as Mock).mockResolvedValue({
+      instantAppId: APP_ID,
+      widgets: [
+        {
+          widgetId: "w-A",
+          slug: "ada",
+          widgetName: "Ada",
+          active: true,
+          displayData: { slug: "ada" },
+        },
+      ],
+    });
+    (getInstantClient as Mock).mockReturnValue(db);
+
+    renderHook(() => useLobbysideIncomingCall({ orgId: "org-1" }));
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(fetchOrgConfig as Mock).toHaveBeenCalledWith(
+      "org-1",
+      expect.any(String),
+    );
+    expect(fetchWidgetConfig as Mock).not.toHaveBeenCalled();
   });
 });
