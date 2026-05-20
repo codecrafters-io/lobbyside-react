@@ -5,6 +5,24 @@ import {
   normalizeConfig,
   subscribeToWidget,
 } from "./instant";
+<<<<<<< Updated upstream
+=======
+import { fetchOrgConfig, type OrgWidgetEntry } from "./org-config";
+import {
+  countQueuedFor,
+  liveWidgetIdsFromSubscription,
+  normalizeOrgWidgetConfig,
+  subscribeToOrg,
+  type OrgSubscribedOrg,
+  type OrgSubscribedWidget,
+} from "./org-instant";
+import { getOrCreateTabId } from "./tab-id";
+import {
+  attachVisitorRooms,
+  type RoomCapableDb,
+  type VisitorRoomBundle,
+} from "./visitor-rooms";
+>>>>>>> Stashed changes
 import { LobbysideError } from "./errors";
 
 /**
@@ -68,6 +86,38 @@ export interface CreateClientOptions {
 
 const DEFAULT_BASE_URL = "https://lobbyside.com";
 
+// Built once per client; mirrors the script-tag bundle's initial-presence
+// shape so the host's Live table sees `useLobbyside` consumers the same
+// way it sees bundle-installed visitors. `incomingCallsEnabled: false` is
+// baked in by `attachVisitorRooms` itself — `useLobbyside` doesn't
+// subscribe to invites, so dialing this tab will never ring. The host UI
+// flips the Call button to a disabled "Incoming calls disabled" state on
+// this flag; the outbound-call route also rejects server-side as a guard
+// against stale UIs.
+function buildJoinCallVisitorPresence(
+  tabId: string,
+): Record<string, unknown> {
+  const now = Date.now();
+  const path = typeof window !== "undefined" ? window.location.pathname : "/";
+  const title = typeof document !== "undefined" ? document.title : "";
+  const origin = typeof window !== "undefined" ? window.location.hostname : "";
+  const referrer = typeof document !== "undefined" ? document.referrer : "";
+  return {
+    kind: "visitor",
+    origin,
+    tabId,
+    pathname: path,
+    pageTitle: title,
+    pageEnteredAt: now,
+    sessionStartedAt: now,
+    referrer,
+    visitedPaths: [{ path, title, enteredAt: now }],
+    // No name/email fields — `useLobbyside` doesn't take a visitor
+    // identity (consumers pass it to `joinCall({ visitor })` instead).
+    // The host's drawer falls back to "Anonymous visitor" for these.
+  };
+}
+
 /**
  * Build a Lobbyside client for a given widget ID. Safe to call multiple
  * times for the same widgetId on the same page — but the hook memoizes
@@ -90,6 +140,13 @@ export function createLobbysideClient(
   let liveSlug: string | undefined = undefined;
   let queuedCount = 0;
   let unsubscribe: (() => void) | null = null;
+  // Visitor-presence bundle (per-tab room + counter + gated heartbeat),
+  // mounted after config resolves so the host's Live table can see this
+  // tab. `useLobbyside` does NOT subscribe to incoming-call invites, so
+  // the bundle publishes `incomingCallsEnabled: false`; the host's UI
+  // disables the Call button accordingly and the outbound-call route
+  // rejects as a server-side guard.
+  let visitorRoomBundle: VisitorRoomBundle | null = null;
   // Guards against the StrictMode double-mount race: destroy() can land
   // before the initial fetchWidgetConfig resolves. Without this flag, the
   // .then handler would still open a subscription on the singleton client,
@@ -207,6 +264,34 @@ export function createLobbysideClient(
       emit();
 
       const db = getInstantClient(config.instantAppId);
+      // Attach visitor-presence bundle so the host's Live table sees this
+      // tab. Publishes `incomingCallsEnabled: false` — `useLobbyside` is
+      // the "render-only" hook and doesn't subscribe to invites.
+      const tabId = getOrCreateTabId();
+      const origin =
+        typeof window !== "undefined" ? window.location.hostname : "";
+      try {
+        visitorRoomBundle = attachVisitorRooms({
+          db: db as unknown as RoomCapableDb,
+          baseUrl,
+          widgetId,
+          tabId,
+          initialPresence: buildJoinCallVisitorPresence(tabId),
+          origin,
+          incomingCallsEnabled: false,
+        });
+      } catch {
+        // Soft-fail: SDK consumer keeps working (state subscription
+        // below is independent), they just won't appear in the host's
+        // Live table from this tab.
+        visitorRoomBundle = null;
+      }
+      if (destroyed) {
+        try {
+          visitorRoomBundle?.destroy();
+        } catch {}
+        visitorRoomBundle = null;
+      }
       const u = subscribeToWidget(db, widgetId, (widget) => {
         if (!widget) return;
         liveConfig = normalizeConfig(widget.widgetConfig);
@@ -240,7 +325,340 @@ export function createLobbysideClient(
       destroyed = true;
       unsubscribe?.();
       unsubscribe = null;
+      try {
+        visitorRoomBundle?.destroy();
+      } catch {}
+      visitorRoomBundle = null;
       listeners.clear();
     },
   };
 }
+<<<<<<< Updated upstream
+=======
+
+// ---------------------------------------------------------------------------
+// Org-mode client. Surfaces the same `LobbysideClient` interface as the
+// widget-mode factory above, so the hook can swap one for the other
+// without forking the React plumbing.
+//
+// State machine differences from widget mode:
+//   - No "offline" status. An org-mode "the host has it off" maps to the
+//     `NO_LIVE_WIDGET` error code instead, because in org mode there's no
+//     single widget identity to surface for an offline render — the org
+//     install renders nothing if 0 widgets are live (matches the bundle).
+//   - "MULTIPLE_LIVE_WIDGETS" is a new error code for the safety-net case
+//     where the host left two widgets on at once (the bundle also renders
+//     nothing here).
+// ---------------------------------------------------------------------------
+
+function widgetByIdIn(
+  org: OrgSubscribedOrg | null,
+  widgetId: string | null,
+): OrgSubscribedWidget | undefined {
+  if (!org?.widgets || !widgetId) return undefined;
+  return org.widgets.find((w) => w.id === widgetId);
+}
+
+function entryByIdIn(
+  entries: OrgWidgetEntry[] | undefined,
+  widgetId: string | null,
+): OrgWidgetEntry | undefined {
+  if (!entries || !widgetId) return undefined;
+  return entries.find((w) => w.widgetId === widgetId);
+}
+
+interface OrgLiveSnapshot {
+  org: OrgSubscribedOrg | null;
+  // The initial HTTP fetch's widgets list. Used as a fallback for
+  // identity / queue size when the live subscription hasn't fired yet
+  // (or doesn't carry those fields).
+  initialWidgets: OrgWidgetEntry[] | null;
+}
+
+function identityForOrgWidget(
+  widgetId: string,
+  snapshot: OrgLiveSnapshot,
+): WidgetIdentity {
+  const live = widgetByIdIn(snapshot.org, widgetId);
+  const liveCfg = normalizeOrgWidgetConfig(live?.widgetConfig);
+  const initial = entryByIdIn(snapshot.initialWidgets ?? undefined, widgetId);
+  const display = initial?.displayData;
+  return {
+    hostName: liveCfg?.hostName ?? display?.hostName ?? "",
+    hostTitle: liveCfg?.hostTitle ?? display?.hostTitle ?? "",
+    avatarUrl: liveCfg?.avatarUrl ?? display?.avatarUrl ?? "",
+    ctaText: liveCfg?.ctaText ?? display?.ctaText ?? "",
+    buttonText: liveCfg?.buttonText ?? display?.buttonText ?? "",
+  };
+}
+
+function slugForOrgWidget(
+  widgetId: string,
+  snapshot: OrgLiveSnapshot,
+): string {
+  const live = widgetByIdIn(snapshot.org, widgetId);
+  if (live?.slug) return live.slug;
+  return entryByIdIn(snapshot.initialWidgets ?? undefined, widgetId)?.slug ?? "";
+}
+
+function maxQueueSizeForOrgWidget(
+  widgetId: string,
+  snapshot: OrgLiveSnapshot,
+): number {
+  const liveCfg = normalizeOrgWidgetConfig(
+    widgetByIdIn(snapshot.org, widgetId)?.widgetConfig,
+  );
+  if (typeof liveCfg?.maxQueueSize === "number") return liveCfg.maxQueueSize;
+  const initial = entryByIdIn(snapshot.initialWidgets ?? undefined, widgetId);
+  return initial?.displayData.maxQueueSize ?? 5;
+}
+
+function queuedCountForOrgWidget(
+  widgetId: string,
+  snapshot: OrgLiveSnapshot,
+): number {
+  const live = widgetByIdIn(snapshot.org, widgetId);
+  return live ? countQueuedFor(live) : 0;
+}
+
+/**
+ * Build a Lobbyside client for an org. Renders whichever single widget
+ * under the org the host has currently switched on, mirroring the
+ * script-tag bundle's org-mode behaviour. Safe to call multiple times
+ * for the same orgId — but the hook memoizes its client instance so we
+ * don't usually hit that path.
+ */
+export function createLobbysideOrgClient(
+  orgId: string,
+  options: CreateClientOptions = {},
+): LobbysideClient {
+  const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+
+  let state: LobbysideWidgetState = { status: "loading" };
+  const snapshot: OrgLiveSnapshot = { org: null, initialWidgets: null };
+  let unsubscribe: (() => void) | null = null;
+  let destroyed = false;
+  const listeners = new Set<() => void>();
+
+  // Org-mode presence: the visitor-rooms bundle rebinds when the host
+  // toggles which widget is live, so the host of the *currently active*
+  // widget always sees this tab in their Live table. Same model as the
+  // call-client's org variant — minus the invite room (this hook is the
+  // render-only one). Publishes `incomingCallsEnabled: false` so the
+  // host's Call button is disabled with an "Incoming calls disabled"
+  // tooltip.
+  const tabId = getOrCreateTabId();
+  let visitorRoomBundle: VisitorRoomBundle | null = null;
+  let activeVisitorRoomsWidgetId: string | null = null;
+  let db: RoomCapableDb | null = null;
+
+  function detachVisitorRooms(): void {
+    try {
+      visitorRoomBundle?.destroy();
+    } catch {}
+    visitorRoomBundle = null;
+  }
+
+  function attachVisitorRoomsForWidget(widgetId: string): void {
+    if (!db) return;
+    detachVisitorRooms();
+    const origin =
+      typeof window !== "undefined" ? window.location.hostname : "";
+    try {
+      visitorRoomBundle = attachVisitorRooms({
+        db,
+        baseUrl,
+        widgetId,
+        tabId,
+        initialPresence: buildJoinCallVisitorPresence(tabId),
+        origin,
+        incomingCallsEnabled: false,
+      });
+    } catch {
+      // Same soft-fail rationale as widget mode: SDK consumer keeps
+      // working, they just won't appear in this widget's Live table.
+      visitorRoomBundle = null;
+    }
+  }
+
+  function applyActiveVisitorWidget(next: string | null): void {
+    if (next === activeVisitorRoomsWidgetId) return;
+    activeVisitorRoomsWidgetId = next;
+    if (next) {
+      attachVisitorRoomsForWidget(next);
+    } else {
+      detachVisitorRooms();
+    }
+  }
+
+  function emit() {
+    for (const l of listeners) l();
+  }
+
+  // Picks the active widget from the live subscription if it's loaded;
+  // otherwise falls back to the initial HTTP snapshot. This lets the
+  // first paint be correct even before the first InstantDB tick lands.
+  function pickActive(): string[] {
+    if (snapshot.org) return liveWidgetIdsFromSubscription(snapshot.org);
+    return (snapshot.initialWidgets ?? [])
+      .filter((w) => w.active)
+      .map((w) => w.widgetId);
+  }
+
+  function recompute() {
+    if (state.status === "error" && state.error.code === "NETWORK") return;
+    if (snapshot.initialWidgets == null && snapshot.org == null) {
+      state = { status: "loading" };
+      return;
+    }
+
+    const active = pickActive();
+    if (active.length === 0) {
+      state = {
+        status: "error",
+        error: new LobbysideError(
+          "NO_LIVE_WIDGET",
+          "No widget in this org is currently live.",
+        ),
+      };
+      return;
+    }
+    if (active.length > 1) {
+      state = {
+        status: "error",
+        error: new LobbysideError(
+          "MULTIPLE_LIVE_WIDGETS",
+          `${active.length} widgets in this org are live; the org-wide install renders nothing until exactly one is on.`,
+        ),
+      };
+      return;
+    }
+
+    const widgetId = active[0];
+    const identity = identityForOrgWidget(widgetId, snapshot);
+    const queuedCount = queuedCountForOrgWidget(widgetId, snapshot);
+    const maxQueueSize = maxQueueSizeForOrgWidget(widgetId, snapshot);
+    const isQueueFull = queuedCount >= maxQueueSize;
+
+    state = {
+      status: "online",
+      ...identity,
+      isQueueFull,
+      joinCall: buildJoinCall(widgetId),
+    };
+  }
+
+  function buildJoinCall(widgetId: string) {
+    return async function joinCall(args?: {
+      visitor?: Record<string, string>;
+    }): Promise<{ entryUrl: string }> {
+      if (state.status !== "online") {
+        throw new LobbysideError(
+          "INACTIVE",
+          "No widget in this org is currently live; cannot join queue.",
+        );
+      }
+      if (state.isQueueFull) {
+        throw new LobbysideError("QUEUE_FULL", "Queue is full.");
+      }
+      const slug = slugForOrgWidget(widgetId, snapshot);
+      let res: Response;
+      try {
+        res = await fetch(`${baseUrl}/api/queue-entries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug,
+            referrerUrl:
+              typeof window !== "undefined" ? window.location.href : "",
+            visitor: args?.visitor,
+          }),
+        });
+      } catch (err) {
+        throw new LobbysideError(
+          "NETWORK",
+          `Failed to reach Lobbyside: ${(err as Error).message}`,
+        );
+      }
+      if (res.status === 403) {
+        throw new LobbysideError("INACTIVE", "Widget is not active.");
+      }
+      if (res.status === 404) {
+        throw new LobbysideError("NOT_FOUND", "Widget not found.");
+      }
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        if (body.error === "queue_full") {
+          throw new LobbysideError("QUEUE_FULL", "Queue is full.");
+        }
+        throw new LobbysideError(
+          "NETWORK",
+          `Join request failed with HTTP ${res.status}.`,
+        );
+      }
+      const data = (await res.json()) as { entryUrl: string };
+      return { entryUrl: data.entryUrl };
+    };
+  }
+
+  // Helper: the single live widget id (or null when 0 / >1 are active).
+  // Used to decide which widget's per-tab presence rooms to attach. Same
+  // 0-or-1 rule as the org-mode call-client and the script-tag bundle.
+  function pickSingleLiveWidgetId(): string | null {
+    const active = pickActive();
+    return active.length === 1 ? active[0] : null;
+  }
+
+  fetchOrgConfig(orgId, baseUrl)
+    .then((config) => {
+      if (destroyed) return;
+      snapshot.initialWidgets = config.widgets;
+      recompute();
+      emit();
+
+      db = getInstantClient(config.instantAppId) as unknown as RoomCapableDb;
+      // Mount the visitor-presence bundle for the initially-active
+      // widget (from the HTTP snapshot). The org subscription below
+      // refines it as soon as the first tick lands.
+      applyActiveVisitorWidget(pickSingleLiveWidgetId());
+
+      const u = subscribeToOrg(
+        getInstantClient(config.instantAppId),
+        orgId,
+        (org) => {
+          if (destroyed) return;
+          snapshot.org = org ?? null;
+          recompute();
+          emit();
+          applyActiveVisitorWidget(pickSingleLiveWidgetId());
+        },
+      );
+      if (destroyed) {
+        u();
+        detachVisitorRooms();
+      } else {
+        unsubscribe = u;
+      }
+    })
+    .catch((err: LobbysideError) => {
+      if (destroyed) return;
+      state = { status: "error", error: err };
+      emit();
+    });
+
+  return {
+    getState: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    destroy() {
+      destroyed = true;
+      unsubscribe?.();
+      unsubscribe = null;
+      detachVisitorRooms();
+      listeners.clear();
+    },
+  };
+}
+>>>>>>> Stashed changes

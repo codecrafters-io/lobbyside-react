@@ -116,6 +116,7 @@ await widget.joinCall({
 
 Keys recognized by the server today: `name`, `email`, `company`, `github`. Whatever you pass pre-fills the corresponding fields on the visitor form at `entryUrl`.
 
+
 ## Errors
 
 `joinCall` throws `LobbysideError`. Branch on `err.code`:
