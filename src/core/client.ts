@@ -389,6 +389,8 @@ export function createLobbysideOrgClient(
 
     const active = pickActive();
     if (active.length === 0) {
+      if (state.status === "error" && state.error.code === "NO_LIVE_WIDGET")
+        return;
       state = {
         status: "error",
         error: new LobbysideError(
@@ -399,6 +401,11 @@ export function createLobbysideOrgClient(
       return;
     }
     if (active.length > 1) {
+      if (
+        state.status === "error" &&
+        state.error.code === "MULTIPLE_LIVE_WIDGETS"
+      )
+        return;
       state = {
         status: "error",
         error: new LobbysideError(
