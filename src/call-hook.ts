@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   createLobbysideIncomingCallClient,
+  createLobbysideOrgIncomingCallClient,
   type LobbysideIncomingCallClient,
   type LobbysideIncomingCallState,
   type VisitorIdentity,
@@ -30,9 +31,78 @@ export interface UseLobbysideIncomingCallOptions {
 }
 
 /**
- * Subscribe to incoming host→visitor calls for a given widget. Returns
- * a state machine: `idle` until a host dials this tab, then `ringing`
- * with `accept`/`decline` handlers.
+ * Options-object form of {@link useLobbysideIncomingCall}. Supplies *one*
+ * of `widgetId` or `orgId`; passing both logs a `console.error` and
+ * keeps the hook in `idle` (matches the script-tag install's dual-attr
+ * rule).
+ */
+export interface UseLobbysideIncomingCallArgs
+  extends UseLobbysideIncomingCallOptions {
+  widgetId?: string;
+  orgId?: string;
+}
+
+type Mode = "widget" | "org" | "idle";
+
+interface NormalizedArgs {
+  mode: Mode;
+  widgetId?: string;
+  orgId?: string;
+  baseUrl?: string;
+  visitor?: VisitorIdentity;
+  ringTimeoutMs?: number;
+}
+
+function normalizeArgs(
+  arg1: string | UseLobbysideIncomingCallArgs,
+  options: UseLobbysideIncomingCallOptions,
+): NormalizedArgs {
+  if (typeof arg1 === "string") {
+    return {
+      mode: "widget",
+      widgetId: arg1,
+      baseUrl: options.baseUrl,
+      visitor: options.visitor,
+      ringTimeoutMs: options.ringTimeoutMs,
+    };
+  }
+  const { widgetId, orgId, baseUrl, visitor, ringTimeoutMs } = arg1;
+  if (widgetId && orgId) {
+    console.error(
+      `[Lobbyside] useLobbysideIncomingCall: pass either { widgetId } or { orgId }, not both. widgetId="${widgetId}", orgId="${orgId}".`,
+    );
+    return { mode: "idle" };
+  }
+  if (widgetId) {
+    return { mode: "widget", widgetId, baseUrl, visitor, ringTimeoutMs };
+  }
+  if (orgId) {
+    return { mode: "org", orgId, baseUrl, visitor, ringTimeoutMs };
+  }
+  return { mode: "idle" };
+}
+
+interface ClientRef {
+  mode: "widget" | "org";
+  key: string;
+  client: LobbysideIncomingCallClient;
+}
+
+/**
+ * Subscribe to incoming host→visitor calls. Returns a state machine:
+ * `idle` until a host dials this tab, then `ringing` with
+ * `accept`/`decline` handlers.
+ *
+ * Two call shapes:
+ *
+ * - `useLobbysideIncomingCall("widget-uuid", options?)` — legacy positional form.
+ * - `useLobbysideIncomingCall({ widgetId | orgId, ...options })` — pick
+ *   at runtime; passing both ids stays idle and logs an error.
+ *
+ * In **org mode** the visitor is reachable by whichever widget in the
+ * org is currently switched on. When the host toggles which widget is
+ * live, the SDK rebinds presence rooms to the new active widget; an
+ * in-flight ring is declined with reason `widget_swapped`.
  *
  * Mount this hook anywhere on your page to make a visitor reachable —
  * it publishes presence + opens the invite room. Pair it with
@@ -44,9 +114,9 @@ export interface UseLobbysideIncomingCallOptions {
  * the user gesture and the popup call trips iOS Safari's popup blocker.
  *
  * @example
- *   const incoming = useLobbysideIncomingCall(widgetId, {
- *     visitor: { name: "Ada", email: "ada@example.com" },
- *   });
+ *   const incoming = useLobbysideIncomingCall({ widgetId, visitor: {...} });
+ *   // org-wide install:
+ *   const incoming = useLobbysideIncomingCall({ orgId, visitor: {...} });
  *   if (incoming.status === "ringing") {
  *     return (
  *       <button onClick={() => {
@@ -58,56 +128,86 @@ export interface UseLobbysideIncomingCallOptions {
  */
 export function useLobbysideIncomingCall(
   widgetId: string,
+  options?: UseLobbysideIncomingCallOptions,
+): LobbysideIncomingCallState;
+export function useLobbysideIncomingCall(
+  args: UseLobbysideIncomingCallArgs,
+): LobbysideIncomingCallState;
+export function useLobbysideIncomingCall(
+  arg1: string | UseLobbysideIncomingCallArgs,
   options: UseLobbysideIncomingCallOptions = {},
 ): LobbysideIncomingCallState {
-  const clientRef = useRef<{
-    id: string;
-    baseUrl: string | undefined;
-    ringTimeoutMs: number | undefined;
-    client: LobbysideIncomingCallClient;
-  } | null>(null);
+  const normalized = normalizeArgs(arg1, options);
+
+  // Visitor lives outside the cacheKey so its mutation propagates via
+  // setVisitor on the same client (no churn). baseUrl + ringTimeoutMs
+  // ARE part of the key because they affect client construction.
+  const cacheKey =
+    normalized.mode === "idle"
+      ? "idle"
+      : `${normalized.mode}:${
+          normalized.widgetId ?? normalized.orgId ?? ""
+        }:${normalized.baseUrl ?? ""}:${normalized.ringTimeoutMs ?? ""}`;
+
+  const clientRef = useRef<ClientRef | null>(null);
 
   useEffect(() => {
-    const cur = clientRef.current;
-    const same =
-      cur &&
-      cur.id === widgetId &&
-      cur.baseUrl === options.baseUrl &&
-      cur.ringTimeoutMs === options.ringTimeoutMs;
-    if (same) return;
-    cur?.client.destroy();
-    clientRef.current = {
-      id: widgetId,
-      baseUrl: options.baseUrl,
-      ringTimeoutMs: options.ringTimeoutMs,
-      client: createLobbysideIncomingCallClient(widgetId, {
-        baseUrl: options.baseUrl,
-        visitor: options.visitor,
-        ringTimeoutMs: options.ringTimeoutMs,
-      }),
-    };
+    if (normalized.mode === "idle") {
+      clientRef.current?.client.destroy();
+      clientRef.current = null;
+      return;
+    }
+    if (clientRef.current && clientRef.current.key === cacheKey) return;
+    clientRef.current?.client.destroy();
+    if (normalized.mode === "widget" && normalized.widgetId) {
+      clientRef.current = {
+        mode: "widget",
+        key: cacheKey,
+        client: createLobbysideIncomingCallClient(normalized.widgetId, {
+          baseUrl: normalized.baseUrl,
+          visitor: normalized.visitor,
+          ringTimeoutMs: normalized.ringTimeoutMs,
+        }),
+      };
+    } else if (normalized.mode === "org" && normalized.orgId) {
+      clientRef.current = {
+        mode: "org",
+        key: cacheKey,
+        client: createLobbysideOrgIncomingCallClient(normalized.orgId, {
+          baseUrl: normalized.baseUrl,
+          visitor: normalized.visitor,
+          ringTimeoutMs: normalized.ringTimeoutMs,
+        }),
+      };
+    }
     return () => {
       clientRef.current?.client.destroy();
       clientRef.current = null;
     };
-    // visitor handled separately so its mutation doesn't recreate the client.
+    // visitor intentionally not in deps; setVisitor diff below handles it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [widgetId, options.baseUrl, options.ringTimeoutMs]);
+  }, [cacheKey]);
 
   // Diff the visitor by stringified value — inline `visitor={{...}}` would
   // otherwise emit a fresh reference each render and spam presence updates.
   const visitorKey = useMemo(
-    () => (options.visitor ? JSON.stringify(options.visitor) : ""),
-    [options.visitor],
+    () => (normalized.visitor ? JSON.stringify(normalized.visitor) : ""),
+    [normalized.visitor],
   );
   useEffect(() => {
-    clientRef.current?.client.setVisitor(options.visitor);
+    clientRef.current?.client.setVisitor(normalized.visitor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visitorKey]);
 
   return useSyncExternalStore(
-    (cb) => clientRef.current?.client.subscribe(cb) ?? (() => undefined),
-    () => clientRef.current?.client.getState() ?? IDLE,
+    (cb: () => void) => {
+      if (normalized.mode === "idle") return () => undefined;
+      return clientRef.current?.client.subscribe(cb) ?? (() => undefined);
+    },
+    () => {
+      if (normalized.mode === "idle") return IDLE;
+      return clientRef.current?.client.getState() ?? IDLE;
+    },
     () => IDLE,
   );
 }

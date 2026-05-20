@@ -1,9 +1,11 @@
 # @lobbyside/react
 
-Render your own custom widget UI against a live [Lobbyside](https://lobbyside.com) widget. Two hooks:
+Render your own custom widget UI against a live [Lobbyside](https://lobbyside.com) install. Two hooks:
 
 - `useLobbyside` — host identity, online/offline + queue state, and a `joinCall` action for the "Join 1:1" CTA.
 - `useLobbysideIncomingCall` — make a visitor reachable from the host's Live tab; ring on incoming calls and offer `accept` / `decline`.
+
+Both hooks accept either a single widget id (the legacy positional form) **or** an options object with `{ widgetId | orgId }` — the org form picks whichever widget in the org the host has currently switched on. See [Org-wide installs](#org-wide-installs) below.
 
 If you just want a drop-in widget with our default look, use the script-tag install instead.
 
@@ -118,12 +120,100 @@ Keys recognized by the server today: `name`, `email`, `company`, `github`. Whate
 
 ## Errors
 
-`joinCall` throws `LobbysideError`. Branch on `err.code`:
+`joinCall` throws `LobbysideError`. The `error` field on the hook's `status: 'error'` state is the same type. Branch on `err.code`:
 
 - `QUEUE_FULL` — thrown client-side when `isQueueFull === true`, or server-side if the queue filled between render and click.
 - `INACTIVE` — the widget was toggled off mid-click.
-- `NOT_FOUND` — the widget ID doesn't exist.
+- `NOT_FOUND` — the widget / org ID doesn't exist.
 - `NETWORK` — anything else (fetch rejection, unexpected HTTP status, malformed JSON).
+- `INVALID_OPTIONS` — you passed both `widgetId` and `orgId` (or neither) to the options-object form. See [Org-wide installs](#org-wide-installs).
+- `NO_LIVE_WIDGET` — org mode only. Zero widgets in the org are currently live; the script-tag bundle would render nothing in this state.
+- `MULTIPLE_LIVE_WIDGETS` — org mode only. Two or more widgets in the org are live simultaneously (safety net — hosts are expected to keep one on).
+
+## Org-wide installs
+
+Pass `{ orgId }` instead of `{ widgetId }` to either hook and the SDK picks whichever widget in the org the host has currently switched on. Matches the `<script data-org-id="...">` install: one mount covers every widget in the org, and flipping which one is live in the dashboard takes effect immediately without a code change.
+
+```tsx
+import { useLobbyside, useLobbysideIncomingCall } from '@lobbyside/react';
+
+export function OrgWidget() {
+  const widget = useLobbyside({ orgId: 'YOUR_ORG_ID' });
+  const incoming = useLobbysideIncomingCall({
+    orgId: 'YOUR_ORG_ID',
+    visitor: { name: 'Ada', email: 'ada@example.com' },
+  });
+
+  if (incoming.status === 'ringing') {
+    return (
+      <button
+        onClick={() => {
+          const { callUrl } = incoming.call.accept();
+          window.open(callUrl, '_blank');
+        }}
+      >
+        Answer {incoming.call.hostName}
+      </button>
+    );
+  }
+
+  if (widget.status === 'loading') return null;
+
+  // 0 or >1 widgets live in the org surface as error states. The bundle
+  // renders nothing in both cases — match that, or render a hint while
+  // the dashboard catches up.
+  if (widget.status === 'error') {
+    if (widget.error.code === 'NO_LIVE_WIDGET') return null;
+    if (widget.error.code === 'MULTIPLE_LIVE_WIDGETS') return null;
+    return null;
+  }
+
+  if (widget.status !== 'online') return null;
+  return (
+    <button
+      disabled={widget.isQueueFull}
+      onClick={async () => {
+        const { entryUrl } = await widget.joinCall();
+        window.open(entryUrl, '_blank');
+      }}
+    >
+      {widget.isQueueFull ? 'Queue is full' : widget.buttonText}
+    </button>
+  );
+}
+```
+
+### How `useLobbyside` handles org state
+
+| Active widgets in the org | `status` | Notes |
+|---|---|---|
+| 0 | `error`, `code: 'NO_LIVE_WIDGET'` | No host is live. |
+| 1 | `online` | Identity + `isQueueFull` + `joinCall` come from that widget. Flipping which widget is on swaps these live; no remount needed. |
+| 2+ | `error`, `code: 'MULTIPLE_LIVE_WIDGETS'` | Safety net while the host toggles. Clears as soon as exactly one stays on. |
+
+`offline` is not used in org mode — a widget that's switched off isn't surfaced as an identity-carrying offline state, because in org mode there's no single widget identity to attach to. If you need an offline fallback per widget, use the widget-id form.
+
+### How `useLobbysideIncomingCall` handles org state
+
+Same hook, same `idle` / `ringing` state machine. The difference is what's happening under the hood:
+
+- When the host toggles which widget is live, the SDK rebinds the visitor's per-tab presence rooms to that widget. The host of the *currently active* widget sees this tab in their Live table; previously-active hosts no longer do.
+- If the active widget changes mid-ring, the in-flight invite is declined with `reason: "widget_swapped"` (matches the script-tag bundle's org-mode teardown).
+- When 0 or >1 widgets are live the visitor is unreachable — `status` stays `idle` and any invite is ignored.
+
+### Validation: don't pass both ids
+
+Passing both `widgetId` and `orgId` to either hook logs a `console.error` and:
+
+- `useLobbyside` returns `{ status: 'error', error: { code: 'INVALID_OPTIONS', ... } }`.
+- `useLobbysideIncomingCall` stays `idle`.
+
+This mirrors the script-tag install's dual-attribute rule: silently picking one would risk pointing at the wrong embed.
+
+```tsx
+// Don't do this. It errors loudly.
+useLobbyside({ widgetId: 'w-1', orgId: 'org-1' });
+```
 
 ## Incoming calls (`useLobbysideIncomingCall`)
 
@@ -270,9 +360,13 @@ The ringing branch takes priority so an inbound call surfaces even while the vis
 
 ## Self-hosted or local dev
 
-Point at a different origin with the `baseUrl` option:
+Point at a different origin with the `baseUrl` option. Works with every call shape:
 
 ```tsx
 useLobbyside('YOUR_WIDGET_ID', { baseUrl: 'http://localhost:3000' });
+useLobbyside({ widgetId: 'YOUR_WIDGET_ID', baseUrl: 'http://localhost:3000' });
+useLobbyside({ orgId: 'YOUR_ORG_ID', baseUrl: 'http://localhost:3000' });
+
 useLobbysideIncomingCall('YOUR_WIDGET_ID', { baseUrl: 'http://localhost:3000' });
+useLobbysideIncomingCall({ orgId: 'YOUR_ORG_ID', baseUrl: 'http://localhost:3000' });
 ```
