@@ -14,12 +14,6 @@ import {
   type OrgSubscribedOrg,
   type OrgSubscribedWidget,
 } from "./org-instant";
-import { getOrCreateTabId } from "./tab-id";
-import {
-  attachVisitorRooms,
-  type RoomCapableDb,
-  type VisitorRoomBundle,
-} from "./visitor-rooms";
 import { LobbysideError } from "./errors";
 
 /**
@@ -131,37 +125,6 @@ async function fetchJoinCall(
   return { entryUrl: data.entryUrl };
 }
 
-// Built once per client; mirrors the script-tag bundle's initial-presence
-// shape so the host's Live table sees `useLobbyside` consumers the same
-// way it sees bundle-installed visitors. `incomingCallsEnabled: false` is
-// baked in by `attachVisitorRooms` itself — `useLobbyside` doesn't
-// subscribe to invites, so dialing this tab will never ring. The host UI
-// flips the Call button to a disabled "Incoming calls disabled" state on
-// this flag; the outbound-call route also rejects server-side as a guard
-// against stale UIs.
-function buildJoinCallVisitorPresence(
-  tabId: string,
-): Record<string, unknown> {
-  const now = Date.now();
-  const path = typeof window !== "undefined" ? window.location.pathname : "/";
-  const title = typeof document !== "undefined" ? document.title : "";
-  const origin = typeof window !== "undefined" ? window.location.hostname : "";
-  const referrer = typeof document !== "undefined" ? document.referrer : "";
-  return {
-    kind: "visitor",
-    origin,
-    tabId,
-    pathname: path,
-    pageTitle: title,
-    pageEnteredAt: now,
-    sessionStartedAt: now,
-    referrer,
-    visitedPaths: [{ path, title, enteredAt: now }],
-    // No name/email fields — `useLobbyside` doesn't take a visitor
-    // identity (consumers pass it to `joinCall({ visitor })` instead).
-    // The host's drawer falls back to "Anonymous visitor" for these.
-  };
-}
 
 /**
  * Build a Lobbyside client for a given widget ID. Safe to call multiple
@@ -185,13 +148,6 @@ export function createLobbysideClient(
   let liveSlug: string | undefined = undefined;
   let queuedCount = 0;
   let unsubscribe: (() => void) | null = null;
-  // Visitor-presence bundle (per-tab room + counter + gated heartbeat),
-  // mounted after config resolves so the host's Live table can see this
-  // tab. `useLobbyside` does NOT subscribe to incoming-call invites, so
-  // the bundle publishes `incomingCallsEnabled: false`; the host's UI
-  // disables the Call button accordingly and the outbound-call route
-  // rejects as a server-side guard.
-  let visitorRoomBundle: VisitorRoomBundle | null = null;
   // Guards against the StrictMode double-mount race: destroy() can land
   // before the initial fetchWidgetConfig resolves. Without this flag, the
   // .then handler would still open a subscription on the singleton client,
@@ -273,34 +229,6 @@ export function createLobbysideClient(
       emit();
 
       const db = getInstantClient(config.instantAppId);
-      // Attach visitor-presence bundle so the host's Live table sees this
-      // tab. Publishes `incomingCallsEnabled: false` — `useLobbyside` is
-      // the "render-only" hook and doesn't subscribe to invites.
-      const tabId = getOrCreateTabId();
-      const origin =
-        typeof window !== "undefined" ? window.location.hostname : "";
-      try {
-        visitorRoomBundle = attachVisitorRooms({
-          db: db as unknown as RoomCapableDb,
-          baseUrl,
-          widgetId,
-          tabId,
-          initialPresence: buildJoinCallVisitorPresence(tabId),
-          origin,
-          incomingCallsEnabled: false,
-        });
-      } catch {
-        // Soft-fail: SDK consumer keeps working (state subscription
-        // below is independent), they just won't appear in the host's
-        // Live table from this tab.
-        visitorRoomBundle = null;
-      }
-      if (destroyed) {
-        try {
-          visitorRoomBundle?.destroy();
-        } catch {}
-        visitorRoomBundle = null;
-      }
       const u = subscribeToWidget(db, widgetId, (widget) => {
         if (!widget) return;
         liveConfig = normalizeConfig(widget.widgetConfig);
@@ -334,10 +262,6 @@ export function createLobbysideClient(
       destroyed = true;
       unsubscribe?.();
       unsubscribe = null;
-      try {
-        visitorRoomBundle?.destroy();
-      } catch {}
-      visitorRoomBundle = null;
       listeners.clear();
     },
   };
@@ -447,57 +371,6 @@ export function createLobbysideOrgClient(
   let destroyed = false;
   const listeners = new Set<() => void>();
 
-  // Org-mode presence: the visitor-rooms bundle rebinds when the host
-  // toggles which widget is live, so the host of the *currently active*
-  // widget always sees this tab in their Live table. Same model as the
-  // call-client's org variant — minus the invite room (this hook is the
-  // render-only one). Publishes `incomingCallsEnabled: false` so the
-  // host's Call button is disabled with an "Incoming calls disabled"
-  // tooltip.
-  const tabId = getOrCreateTabId();
-  let visitorRoomBundle: VisitorRoomBundle | null = null;
-  let activeVisitorRoomsWidgetId: string | null = null;
-  let db: RoomCapableDb | null = null;
-
-  function detachVisitorRooms(): void {
-    try {
-      visitorRoomBundle?.destroy();
-    } catch {}
-    visitorRoomBundle = null;
-  }
-
-  function attachVisitorRoomsForWidget(widgetId: string): void {
-    if (!db) return;
-    detachVisitorRooms();
-    const origin =
-      typeof window !== "undefined" ? window.location.hostname : "";
-    try {
-      visitorRoomBundle = attachVisitorRooms({
-        db,
-        baseUrl,
-        widgetId,
-        tabId,
-        initialPresence: buildJoinCallVisitorPresence(tabId),
-        origin,
-        incomingCallsEnabled: false,
-      });
-    } catch {
-      // Same soft-fail rationale as widget mode: SDK consumer keeps
-      // working, they just won't appear in this widget's Live table.
-      visitorRoomBundle = null;
-    }
-  }
-
-  function applyActiveVisitorWidget(next: string | null): void {
-    if (next === activeVisitorRoomsWidgetId) return;
-    activeVisitorRoomsWidgetId = next;
-    if (next) {
-      attachVisitorRoomsForWidget(next);
-    } else {
-      detachVisitorRooms();
-    }
-  }
-
   function emit() {
     for (const l of listeners) l();
   }
@@ -586,14 +459,6 @@ export function createLobbysideOrgClient(
     };
   }
 
-  // Helper: the single live widget id (or null when 0 / >1 are active).
-  // Used to decide which widget's per-tab presence rooms to attach. Same
-  // 0-or-1 rule as the org-mode call-client and the script-tag bundle.
-  function pickSingleLiveWidgetId(): string | null {
-    const active = pickActive();
-    return active.length === 1 ? active[0] : null;
-  }
-
   fetchOrgConfig(orgId, baseUrl)
     .then((config) => {
       if (destroyed) return;
@@ -601,31 +466,15 @@ export function createLobbysideOrgClient(
       recompute();
       emit();
 
-      // Single InstantDB client instance reused for (a) the org-state
-      // subscription and (b) the visitor-rooms bundle (which needs the
-      // room-capable surface). The cast is safe because `getInstantClient`
-      // returns the same shape `RoomCapableDb` requires — we just don't
-      // re-declare `joinRoom` in its TS surface.
       const instantClient = getInstantClient(config.instantAppId);
-      db = instantClient as unknown as RoomCapableDb;
-      // Mount the visitor-presence bundle for the initially-active
-      // widget (from the HTTP snapshot). The org subscription below
-      // refines it as soon as the first tick lands.
-      applyActiveVisitorWidget(pickSingleLiveWidgetId());
-
       const u = subscribeToOrg(instantClient, orgId, (org) => {
         if (destroyed) return;
         snapshot.org = org ?? null;
         recompute();
         emit();
-        // Rebind which widget owns this tab's presence whenever the org
-        // tick updates which one is live. No-op if the active widget
-        // hasn't changed (applyActiveVisitorWidget guards on identity).
-        applyActiveVisitorWidget(pickSingleLiveWidgetId());
       });
       if (destroyed) {
         u();
-        detachVisitorRooms();
       } else {
         unsubscribe = u;
       }
@@ -646,7 +495,6 @@ export function createLobbysideOrgClient(
       destroyed = true;
       unsubscribe?.();
       unsubscribe = null;
-      detachVisitorRooms();
       listeners.clear();
     },
   };
