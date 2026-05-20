@@ -2,7 +2,24 @@ export type LobbysideErrorCode =
   | "QUEUE_FULL"
   | "INACTIVE"
   | "NOT_FOUND"
-  | "NETWORK";
+  | "NETWORK"
+  // Thrown by the options-object form of `useLobbyside` / `useLobbysideIncomingCall`
+  // when the caller passes both `widgetId` and `orgId` (or neither). Mirrors
+  // the bundle's dual-attribute conflict check on the <script> tag — both
+  // can't be set at once because we'd have to silently pick one and risk
+  // pointing the consumer at the wrong install.
+  | "INVALID_OPTIONS"
+  // Org-mode only: every widget under the org is currently inactive. The
+  // bundle renders nothing in this state; the SDK surfaces it as an error
+  // so consumer code can `if (state.status === "error" && state.error.code
+  // === "NO_LIVE_WIDGET") return null;` without re-implementing the
+  // "is any widget live" check itself.
+  | "NO_LIVE_WIDGET"
+  // Org-mode only: two or more widgets are simultaneously live. Same
+  // bundle behaviour as the 0-active case (render nothing — hosts are
+  // expected to keep only one on), separate code so the consumer can
+  // log/diagnose the misconfiguration.
+  | "MULTIPLE_LIVE_WIDGETS";
 
 /**
  * Errors thrown by the Lobbyside SDK.

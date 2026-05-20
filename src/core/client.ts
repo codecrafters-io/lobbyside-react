@@ -5,8 +5,6 @@ import {
   normalizeConfig,
   subscribeToWidget,
 } from "./instant";
-<<<<<<< Updated upstream
-=======
 import { fetchOrgConfig, type OrgWidgetEntry } from "./org-config";
 import {
   countQueuedFor,
@@ -22,7 +20,6 @@ import {
   type RoomCapableDb,
   type VisitorRoomBundle,
 } from "./visitor-rooms";
->>>>>>> Stashed changes
 import { LobbysideError } from "./errors";
 
 /**
@@ -85,6 +82,54 @@ export interface CreateClientOptions {
 }
 
 const DEFAULT_BASE_URL = "https://lobbyside.com";
+
+// Shared join-queue POST. Lives at module scope so both the widget-mode
+// and org-mode clients hit identical request shape + error translation.
+// Throws `LobbysideError` for every non-2xx path so the consumer's catch
+// block is exhaustive on `err.code`.
+async function fetchJoinCall(
+  baseUrl: string,
+  slug: string,
+  visitor: Record<string, string> | undefined,
+): Promise<{ entryUrl: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/queue-entries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slug,
+        referrerUrl: typeof window !== "undefined" ? window.location.href : "",
+        visitor,
+      }),
+    });
+  } catch (err) {
+    throw new LobbysideError(
+      "NETWORK",
+      `Failed to reach Lobbyside: ${(err as Error).message}`,
+    );
+  }
+
+  if (res.status === 403) {
+    throw new LobbysideError("INACTIVE", "Widget is not active.");
+  }
+  if (res.status === 404) {
+    throw new LobbysideError("NOT_FOUND", "Widget not found.");
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    if (body.error === "queue_full") {
+      throw new LobbysideError("QUEUE_FULL", "Queue is full.");
+    }
+    throw new LobbysideError(
+      "NETWORK",
+      `Join request failed with HTTP ${res.status}.`,
+    );
+  }
+
+  const data = (await res.json()) as { entryUrl: string };
+  return { entryUrl: data.entryUrl };
+}
 
 // Built once per client; mirrors the script-tag bundle's initial-presence
 // shape so the host's Live table sees `useLobbyside` consumers the same
@@ -216,43 +261,7 @@ export function createLobbysideClient(
     }
 
     const slug = liveSlug ?? initial?.displayData.slug ?? "";
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl}/api/queue-entries`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          slug,
-          referrerUrl: typeof window !== "undefined" ? window.location.href : "",
-          visitor: args?.visitor,
-        }),
-      });
-    } catch (err) {
-      throw new LobbysideError(
-        "NETWORK",
-        `Failed to reach Lobbyside: ${(err as Error).message}`,
-      );
-    }
-
-    if (res.status === 403) {
-      throw new LobbysideError("INACTIVE", "Widget is not active.");
-    }
-    if (res.status === 404) {
-      throw new LobbysideError("NOT_FOUND", "Widget not found.");
-    }
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (body.error === "queue_full") {
-        throw new LobbysideError("QUEUE_FULL", "Queue is full.");
-      }
-      throw new LobbysideError(
-        "NETWORK",
-        `Join request failed with HTTP ${res.status}.`,
-      );
-    }
-
-    const data = (await res.json()) as { entryUrl: string };
-    return { entryUrl: data.entryUrl };
+    return fetchJoinCall(baseUrl, slug, args?.visitor);
   }
 
   // Boot: fetch initial config, then open the subscription.
@@ -333,8 +342,6 @@ export function createLobbysideClient(
     },
   };
 }
-<<<<<<< Updated upstream
-=======
 
 // ---------------------------------------------------------------------------
 // Org-mode client. Surfaces the same `LobbysideClient` interface as the
@@ -514,6 +521,13 @@ export function createLobbysideOrgClient(
 
     const active = pickActive();
     if (active.length === 0) {
+      // Bail before constructing a fresh LobbysideError so that
+      // useSyncExternalStore sees an `===` snapshot when the
+      // 0-live-widgets condition just persists. Without this guard the
+      // hook would emit a new error object on every InstantDB tick and
+      // force a re-render in consumers.
+      if (state.status === "error" && state.error.code === "NO_LIVE_WIDGET")
+        return;
       state = {
         status: "error",
         error: new LobbysideError(
@@ -524,6 +538,12 @@ export function createLobbysideOrgClient(
       return;
     }
     if (active.length > 1) {
+      // Same referential-equality guard as the 0-live case above.
+      if (
+        state.status === "error" &&
+        state.error.code === "MULTIPLE_LIVE_WIDGETS"
+      )
+        return;
       state = {
         status: "error",
         error: new LobbysideError(
@@ -562,42 +582,7 @@ export function createLobbysideOrgClient(
         throw new LobbysideError("QUEUE_FULL", "Queue is full.");
       }
       const slug = slugForOrgWidget(widgetId, snapshot);
-      let res: Response;
-      try {
-        res = await fetch(`${baseUrl}/api/queue-entries`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            slug,
-            referrerUrl:
-              typeof window !== "undefined" ? window.location.href : "",
-            visitor: args?.visitor,
-          }),
-        });
-      } catch (err) {
-        throw new LobbysideError(
-          "NETWORK",
-          `Failed to reach Lobbyside: ${(err as Error).message}`,
-        );
-      }
-      if (res.status === 403) {
-        throw new LobbysideError("INACTIVE", "Widget is not active.");
-      }
-      if (res.status === 404) {
-        throw new LobbysideError("NOT_FOUND", "Widget not found.");
-      }
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        if (body.error === "queue_full") {
-          throw new LobbysideError("QUEUE_FULL", "Queue is full.");
-        }
-        throw new LobbysideError(
-          "NETWORK",
-          `Join request failed with HTTP ${res.status}.`,
-        );
-      }
-      const data = (await res.json()) as { entryUrl: string };
-      return { entryUrl: data.entryUrl };
+      return fetchJoinCall(baseUrl, slug, args?.visitor);
     };
   }
 
@@ -616,23 +601,28 @@ export function createLobbysideOrgClient(
       recompute();
       emit();
 
-      db = getInstantClient(config.instantAppId) as unknown as RoomCapableDb;
+      // Single InstantDB client instance reused for (a) the org-state
+      // subscription and (b) the visitor-rooms bundle (which needs the
+      // room-capable surface). The cast is safe because `getInstantClient`
+      // returns the same shape `RoomCapableDb` requires — we just don't
+      // re-declare `joinRoom` in its TS surface.
+      const instantClient = getInstantClient(config.instantAppId);
+      db = instantClient as unknown as RoomCapableDb;
       // Mount the visitor-presence bundle for the initially-active
       // widget (from the HTTP snapshot). The org subscription below
       // refines it as soon as the first tick lands.
       applyActiveVisitorWidget(pickSingleLiveWidgetId());
 
-      const u = subscribeToOrg(
-        getInstantClient(config.instantAppId),
-        orgId,
-        (org) => {
-          if (destroyed) return;
-          snapshot.org = org ?? null;
-          recompute();
-          emit();
-          applyActiveVisitorWidget(pickSingleLiveWidgetId());
-        },
-      );
+      const u = subscribeToOrg(instantClient, orgId, (org) => {
+        if (destroyed) return;
+        snapshot.org = org ?? null;
+        recompute();
+        emit();
+        // Rebind which widget owns this tab's presence whenever the org
+        // tick updates which one is live. No-op if the active widget
+        // hasn't changed (applyActiveVisitorWidget guards on identity).
+        applyActiveVisitorWidget(pickSingleLiveWidgetId());
+      });
       if (destroyed) {
         u();
         detachVisitorRooms();
@@ -661,4 +651,3 @@ export function createLobbysideOrgClient(
     },
   };
 }
->>>>>>> Stashed changes

@@ -81,14 +81,23 @@ function attachActiveHostsListener(
   widgetId: string,
   onChange: (hostPresent: boolean) => void,
 ): { room: InstantRoom | null; unsub: (() => void) | null } {
+  // Pure-subscriber join: we don't `publish` here, so our peer is
+  // ignored by the `kind === "host"` filter on the receiving side.
+  let room: InstantRoom;
   try {
-    // Pure-subscriber join: we don't `publish` here, so our peer is
-    // ignored by the `kind === "host"` filter on the receiving side.
-    const room = db.joinRoom(
+    room = db.joinRoom(
       "widgetActiveHosts",
       `${widgetId}${ACTIVE_HOSTS_ROOM_ID_SUFFIX}`,
       { initialPresence: {} },
     );
+  } catch {
+    // Join failure: gate stays closed. The widget keeps working (per-tab
+    // room, invites) but doesn't appear in the host's Live table. Better
+    // than flooding the endpoint from clients we can't observe.
+    return { room: null, unsub: null };
+  }
+
+  try {
     const unsub = (
       room as unknown as RoomWithSubscribePresence
     ).subscribePresence({ keys: ["kind"] }, (slice) => {
@@ -96,10 +105,16 @@ function attachActiveHostsListener(
     });
     return { room, unsub };
   } catch {
-    // Subscribe failure: gate stays closed. The widget keeps working
-    // (per-tab room, invites) but doesn't appear in the host's Live
-    // table. Better than flooding the endpoint from clients we can't
-    // observe.
+    // subscribePresence failed AFTER joinRoom succeeded — clean up the
+    // room we successfully joined to avoid leaking the presence entry
+    // and WebSocket resources. Without this, every subscribe failure
+    // would leave a phantom peer in the active-hosts room until the
+    // tab closes.
+    try {
+      room.leaveRoom();
+    } catch {
+      // best-effort
+    }
     return { room: null, unsub: null };
   }
 }

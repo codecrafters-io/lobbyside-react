@@ -31,6 +31,9 @@ interface RoomCall {
 
 interface FakeRoom {
   topics: Map<string, (event: unknown) => void>;
+  presenceSubscribers: ((slice: {
+    peers?: Record<string, Record<string, unknown>>;
+  }) => void)[];
   publishedTopics: { topic: string; payload: unknown }[];
   publishedPresence: Record<string, unknown>[];
   leftRoom: boolean;
@@ -52,6 +55,7 @@ function makeFakeDb() {
       calls.push({ type, id, initialPresence: opts.initialPresence });
       const room: FakeRoom = {
         topics: new Map(),
+        presenceSubscribers: [],
         publishedTopics: [],
         publishedPresence: [],
         leftRoom: false,
@@ -62,6 +66,25 @@ function makeFakeDb() {
           room.topics.set(name, cb);
           return () => {
             if (room.topics.get(name) === cb) room.topics.delete(name);
+          };
+        },
+        // Powers the directory-heartbeat gating in the SDK — visitor-rooms
+        // subscribes here and starts the PUT loop only when a peer with
+        // `kind === "host"` shows up. Test default: no host present, so
+        // the gated heartbeat stays silent.
+        subscribePresence(
+          _opts: unknown,
+          cb: (slice: {
+            peers?: Record<string, Record<string, unknown>>;
+          }) => void,
+        ) {
+          room.presenceSubscribers.push(cb);
+          // Fire initial callback with empty peers so the gate decides
+          // synchronously rather than waiting for a phantom "first tick".
+          cb({ peers: {} });
+          return () => {
+            const i = room.presenceSubscribers.indexOf(cb);
+            if (i >= 0) room.presenceSubscribers.splice(i, 1);
           };
         },
         publishTopic(name: string, payload: unknown) {
@@ -155,9 +178,13 @@ describe("createLobbysideIncomingCallClient", () => {
     const { client, rooms } = await bootClient({ visitor: { name: "Ada" } });
 
     expect(client.getState().status).toBe("idle");
-    expect(rooms[`widgetVisitors:${WIDGET_ID}`]).toBeDefined();
+    // Per-tab room id matches the script-tag bundle so the host sees SDK
+    // consumers identically. The previous bare `widgetVisitors:${WIDGET_ID}`
+    // room aliased the pre-`052aee1` shared PII room.
+    expect(rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`]).toBeDefined();
     expect(rooms[`visitorInvites:${tabId()}`]).toBeDefined();
-    const presence = rooms[`widgetVisitors:${WIDGET_ID}`].publishedPresence;
+    const presence =
+      rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`].publishedPresence;
     expect(presence).toEqual([]); // joinRoom uses initialPresence, not publish
     expect(
       rooms[`visitorInvites:${tabId()}`].topics.get("invite"),
@@ -289,7 +316,8 @@ describe("createLobbysideIncomingCallClient", () => {
   it("setVisitor publishes a presence update", async () => {
     const ctx = await bootClient({ visitor: { name: "Old" } });
     ctx.client.setVisitor({ name: "New", email: "n@e.co" });
-    const presence = ctx.rooms[`widgetVisitors:${WIDGET_ID}`].publishedPresence;
+    const presence =
+      ctx.rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`].publishedPresence;
     expect(presence).toEqual([{ visitorName: "New", visitorEmail: "n@e.co" }]);
   });
 
@@ -316,7 +344,8 @@ describe("createLobbysideIncomingCallClient", () => {
     });
 
     client.setVisitor(undefined);
-    const update = rooms[`widgetVisitors:${WIDGET_ID}`].publishedPresence[0];
+    const update =
+      rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`].publishedPresence[0];
     expect(Object.keys(update).sort()).toEqual(
       ["visitorEmail", "visitorName"].sort(),
     );
@@ -355,10 +384,13 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(inviteRoom.leftRoom).toBe(true);
   });
 
-  it("destroy unsubscribes topics and leaves both rooms", async () => {
+  it("destroy unsubscribes topics and leaves all visitor + invite rooms", async () => {
     const ctx = await bootClient();
     const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
-    const visitorRoom = ctx.rooms[`widgetVisitors:${WIDGET_ID}`];
+    const visitorRoom = ctx.rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`];
+    const counterRoom = ctx.rooms[`widgetVisitorCounter:${WIDGET_ID}:_counter`];
+    const activeHostsRoom =
+      ctx.rooms[`widgetActiveHosts:${WIDGET_ID}:_hosts`];
     expect(inviteRoom.topics.size).toBe(2);
 
     ctx.client.destroy();
@@ -366,6 +398,11 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(inviteRoom.topics.size).toBe(0);
     expect(inviteRoom.leftRoom).toBe(true);
     expect(visitorRoom.leftRoom).toBe(true);
+    // Counter + active-hosts rooms are joined for their side effects
+    // (pill count, heartbeat gating). Both must be left on destroy
+    // otherwise the SDK consumer keeps a phantom presence after unmount.
+    expect(counterRoom.leftRoom).toBe(true);
+    expect(activeHostsRoom.leftRoom).toBe(true);
   });
 
   it("destroy while ringing declines the active invite (Bugbot regression)", async () => {
