@@ -77,6 +77,50 @@ export interface CreateClientOptions {
 
 const DEFAULT_BASE_URL = "https://lobbyside.com";
 
+async function fetchJoinCall(
+  baseUrl: string,
+  slug: string,
+  visitor: Record<string, string> | undefined,
+): Promise<{ entryUrl: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/queue-entries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slug,
+        referrerUrl: typeof window !== "undefined" ? window.location.href : "",
+        visitor,
+      }),
+    });
+  } catch (err) {
+    throw new LobbysideError(
+      "NETWORK",
+      `Failed to reach Lobbyside: ${(err as Error).message}`,
+    );
+  }
+
+  if (res.status === 403) {
+    throw new LobbysideError("INACTIVE", "Widget is not active.");
+  }
+  if (res.status === 404) {
+    throw new LobbysideError("NOT_FOUND", "Widget not found.");
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    if (body.error === "queue_full") {
+      throw new LobbysideError("QUEUE_FULL", "Queue is full.");
+    }
+    throw new LobbysideError(
+      "NETWORK",
+      `Join request failed with HTTP ${res.status}.`,
+    );
+  }
+
+  const data = (await res.json()) as { entryUrl: string };
+  return { entryUrl: data.entryUrl };
+}
+
 /**
  * Build a Lobbyside client for a given widget ID. Safe to call multiple
  * times for the same widgetId on the same page — but the hook memoizes
@@ -168,43 +212,7 @@ export function createLobbysideClient(
     }
 
     const slug = liveSlug ?? initial?.displayData.slug ?? "";
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl}/api/queue-entries`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          slug,
-          referrerUrl: typeof window !== "undefined" ? window.location.href : "",
-          visitor: args?.visitor,
-        }),
-      });
-    } catch (err) {
-      throw new LobbysideError(
-        "NETWORK",
-        `Failed to reach Lobbyside: ${(err as Error).message}`,
-      );
-    }
-
-    if (res.status === 403) {
-      throw new LobbysideError("INACTIVE", "Widget is not active.");
-    }
-    if (res.status === 404) {
-      throw new LobbysideError("NOT_FOUND", "Widget not found.");
-    }
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (body.error === "queue_full") {
-        throw new LobbysideError("QUEUE_FULL", "Queue is full.");
-      }
-      throw new LobbysideError(
-        "NETWORK",
-        `Join request failed with HTTP ${res.status}.`,
-      );
-    }
-
-    const data = (await res.json()) as { entryUrl: string };
-    return { entryUrl: data.entryUrl };
+    return fetchJoinCall(baseUrl, slug, args?.visitor);
   }
 
   // Boot: fetch initial config, then open the subscription.
@@ -429,42 +437,7 @@ export function createLobbysideOrgClient(
         throw new LobbysideError("QUEUE_FULL", "Queue is full.");
       }
       const slug = slugForOrgWidget(widgetId, snapshot);
-      let res: Response;
-      try {
-        res = await fetch(`${baseUrl}/api/queue-entries`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            slug,
-            referrerUrl:
-              typeof window !== "undefined" ? window.location.href : "",
-            visitor: args?.visitor,
-          }),
-        });
-      } catch (err) {
-        throw new LobbysideError(
-          "NETWORK",
-          `Failed to reach Lobbyside: ${(err as Error).message}`,
-        );
-      }
-      if (res.status === 403) {
-        throw new LobbysideError("INACTIVE", "Widget is not active.");
-      }
-      if (res.status === 404) {
-        throw new LobbysideError("NOT_FOUND", "Widget not found.");
-      }
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        if (body.error === "queue_full") {
-          throw new LobbysideError("QUEUE_FULL", "Queue is full.");
-        }
-        throw new LobbysideError(
-          "NETWORK",
-          `Join request failed with HTTP ${res.status}.`,
-        );
-      }
-      const data = (await res.json()) as { entryUrl: string };
-      return { entryUrl: data.entryUrl };
+      return fetchJoinCall(baseUrl, slug, args?.visitor);
     };
   }
 
