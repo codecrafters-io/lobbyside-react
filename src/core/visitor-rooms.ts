@@ -91,6 +91,9 @@ function attachActiveHostsListener(
       { initialPresence: {} },
     );
   } catch {
+    // Join failure: gate stays closed. The widget keeps working (per-tab
+    // room, invites) but doesn't appear in the host's Live table. Better
+    // than flooding the endpoint from clients we can't observe.
     return { room: null, unsub: null };
   }
 
@@ -102,8 +105,11 @@ function attachActiveHostsListener(
     });
     return { room, unsub };
   } catch {
-    // subscribePresence failed: clean up the room we successfully joined
-    // to avoid leaking the presence entry and WebSocket resources.
+    // subscribePresence failed AFTER joinRoom succeeded — clean up the
+    // room we successfully joined to avoid leaking the presence entry
+    // and WebSocket resources. Without this, every subscribe failure
+    // would leave a phantom peer in the active-hosts room until the
+    // tab closes.
     try {
       room.leaveRoom();
     } catch {
@@ -123,11 +129,23 @@ function startGatedDirectoryHeartbeat(args: {
   baseUrl: string;
   widgetId: string;
   tabId: string;
+  // When `false`, the heartbeat appends `?ice=0` so the server-side row
+  // gets `incomingCallsEnabled: false`. The outbound-call route reads
+  // this row and refuses to dial tabs that opted out (the host UI also
+  // disables the Call button via presence — this is the belt-and-braces
+  // server guard for the case where a stale UI tries anyway).
+  // Default is `true` (omit the query) for backward compatibility with
+  // the script-tag bundle and existing SDK consumers.
+  incomingCallsEnabled?: boolean;
 }): HeartbeatHandle {
-  const { db, baseUrl, widgetId, tabId } = args;
-  const url = `${baseUrl}/api/widget/${encodeURIComponent(
+  const { db, baseUrl, widgetId, tabId, incomingCallsEnabled } = args;
+  const baseHeartbeatUrl = `${baseUrl}/api/widget/${encodeURIComponent(
     widgetId,
   )}/live-tabs/${encodeURIComponent(tabId)}`;
+  const url =
+    incomingCallsEnabled === false
+      ? `${baseHeartbeatUrl}?ice=0`
+      : baseHeartbeatUrl;
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let jitterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -273,6 +291,10 @@ export interface AttachVisitorRoomsArgs {
   tabId: string;
   initialPresence: Record<string, unknown>;
   origin: string;
+  // Forwarded into the per-tab presence record AND the directory
+  // heartbeat URL (`?ice=0`) when `false`. Default `true`. See
+  // `startGatedDirectoryHeartbeat` for the server-guard rationale.
+  incomingCallsEnabled?: boolean;
 }
 
 export interface VisitorRoomBundle {
@@ -311,11 +333,20 @@ export interface VisitorRoomBundle {
 export function attachVisitorRooms(
   args: AttachVisitorRoomsArgs,
 ): VisitorRoomBundle {
+  // Bake `incomingCallsEnabled` into the per-tab presence so the host's
+  // Live table can render "Incoming calls disabled" on the Call button
+  // without needing a separate DB query. Default `true` matches every
+  // legacy SDK consumer + script-tag bundle visitor.
+  const incomingCallsEnabled = args.incomingCallsEnabled !== false;
+  const initialPresence: Record<string, unknown> = {
+    ...args.initialPresence,
+    incomingCallsEnabled,
+  };
   const visitorRoom = joinVisitorRoom(
     args.db,
     args.widgetId,
     args.tabId,
-    args.initialPresence,
+    initialPresence,
   );
   const counterRoom = joinCounterRoom(args.db, args.widgetId, args.origin);
   const heartbeat = startGatedDirectoryHeartbeat({
@@ -323,6 +354,7 @@ export function attachVisitorRooms(
     baseUrl: args.baseUrl,
     widgetId: args.widgetId,
     tabId: args.tabId,
+    incomingCallsEnabled,
   });
 
   let destroyed = false;

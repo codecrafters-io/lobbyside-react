@@ -1,6 +1,6 @@
 {
   "name": "@lobbyside/react",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "React hook for embedding a custom Lobbyside widget UI in your app.",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup",

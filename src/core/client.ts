@@ -77,6 +77,10 @@ export interface CreateClientOptions {
 
 const DEFAULT_BASE_URL = "https://lobbyside.com";
 
+// Shared join-queue POST. Lives at module scope so both the widget-mode
+// and org-mode clients hit identical request shape + error translation.
+// Throws `LobbysideError` for every non-2xx path so the consumer's catch
+// block is exhaustive on `err.code`.
 async function fetchJoinCall(
   baseUrl: string,
   slug: string,
@@ -120,6 +124,7 @@ async function fetchJoinCall(
   const data = (await res.json()) as { entryUrl: string };
   return { entryUrl: data.entryUrl };
 }
+
 
 /**
  * Build a Lobbyside client for a given widget ID. Safe to call multiple
@@ -389,6 +394,11 @@ export function createLobbysideOrgClient(
 
     const active = pickActive();
     if (active.length === 0) {
+      // Bail before constructing a fresh LobbysideError so that
+      // useSyncExternalStore sees an `===` snapshot when the
+      // 0-live-widgets condition just persists. Without this guard the
+      // hook would emit a new error object on every InstantDB tick and
+      // force a re-render in consumers.
       if (state.status === "error" && state.error.code === "NO_LIVE_WIDGET")
         return;
       state = {
@@ -401,6 +411,7 @@ export function createLobbysideOrgClient(
       return;
     }
     if (active.length > 1) {
+      // Same referential-equality guard as the 0-live case above.
       if (
         state.status === "error" &&
         state.error.code === "MULTIPLE_LIVE_WIDGETS"
@@ -455,8 +466,8 @@ export function createLobbysideOrgClient(
       recompute();
       emit();
 
-      const db = getInstantClient(config.instantAppId);
-      const u = subscribeToOrg(db, orgId, (org) => {
+      const instantClient = getInstantClient(config.instantAppId);
+      const u = subscribeToOrg(instantClient, orgId, (org) => {
         if (destroyed) return;
         snapshot.org = org ?? null;
         recompute();

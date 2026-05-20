@@ -118,6 +118,7 @@ await widget.joinCall({
 
 Keys recognized by the server today: `name`, `email`, `company`, `github`. Whatever you pass pre-fills the corresponding fields on the visitor form at `entryUrl`.
 
+
 ## Errors
 
 `joinCall` throws `LobbysideError`. The `error` field on the hook's `status: 'error'` state is the same type. Branch on `err.code`:
