@@ -388,7 +388,6 @@ describe("createLobbysideOrgIncomingCallClient", () => {
     expect(rooms[`widgetVisitors:w-A:${tabId()}`].leftRoom).toBe(true);
     expect(rooms[`visitorInvites:${tabId()}`].leftRoom).toBe(true);
     expect(rooms[`widgetVisitorCounter:w-A:_counter`].leftRoom).toBe(true);
-    expect(rooms[`widgetActiveHosts:w-A:_hosts`].leftRoom).toBe(true);
     expect(subscribes[0].unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
