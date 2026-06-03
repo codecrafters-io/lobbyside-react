@@ -65,9 +65,25 @@ export function createPresenceTimeline(tabId: string): PresenceTimeline {
     return visitedPaths.map((e) => ({ ...e }));
   }
 
+  function pushPath(next: string): void {
+    pathname = next;
+    pageTitle = currentTitle();
+    pageEnteredAt = Date.now();
+    visitedPaths.push({ path: next, title: pageTitle, enteredAt: pageEnteredAt });
+    while (visitedPaths.length > VISITED_PATHS_CAP) visitedPaths.shift();
+  }
+
+  // Nav hooks only arm after the async config fetch — catch any route change
+  // that landed in that gap so the first attach body isn't stuck on boot path.
+  function syncLocation(): void {
+    const next = currentPathname();
+    if (next !== pathname) pushPath(next);
+  }
+
   function buildBody(
     visitor: VisitorPrefillData | undefined,
   ): Record<string, unknown> {
+    syncLocation();
     return {
       kind: "visitor",
       origin,
@@ -107,11 +123,7 @@ export function createPresenceTimeline(tabId: string): PresenceTimeline {
       }, TITLE_SETTLE_MS);
       return;
     }
-    pathname = next;
-    pageTitle = currentTitle();
-    pageEnteredAt = Date.now();
-    visitedPaths.push({ path: next, title: pageTitle, enteredAt: pageEnteredAt });
-    while (visitedPaths.length > VISITED_PATHS_CAP) visitedPaths.shift();
+    pushPath(next);
     onChange(journeyDiff());
     clearTitleTimer();
     titleTimer = setTimeout(() => {

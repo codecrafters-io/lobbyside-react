@@ -552,6 +552,35 @@ describe("createLobbysideIncomingCallClient", () => {
     window.history.pushState({}, "", "/");
   });
 
+  // Regression (Bugbot): nav hooks arm only after the async config fetch. A
+  // route change in that gap must still surface in the first attach body.
+  it("captures a navigation that landed before config resolved", async () => {
+    window.history.replaceState({}, "", "/");
+    const { db, calls } = makeFakeDb();
+    (fetchWidgetConfig as Mock).mockResolvedValue({
+      active: true,
+      instantAppId: APP_ID,
+      displayData: { slug: "test-slug" },
+    });
+    (getInstantClient as Mock).mockReturnValue(db);
+
+    const client = createLobbysideIncomingCallClient(WIDGET_ID, {
+      baseUrl: "http://localhost:3000",
+    });
+    // Visitor navigates while config is still in flight (hooks not armed yet).
+    window.history.pushState({}, "", "/pricing");
+    await flushMicrotasks();
+
+    const presence = calls.find((c) => c.type === "widgetVisitors")
+      ?.initialPresence as Record<string, unknown>;
+    expect(presence.pathname).toBe("/pricing");
+    const paths = presence.visitedPaths as { path: string }[];
+    expect(paths.some((p) => p.path === "/pricing")).toBe(true);
+
+    client.destroy();
+    window.history.pushState({}, "", "/");
+  });
+
   // Regression (Bugbot): setVisitor must refresh the polled directory row, not
   // just the per-tab room, or the host's Live list shows a stale name/email.
   it("setVisitor re-PUTs the heartbeat with updated identity", async () => {
