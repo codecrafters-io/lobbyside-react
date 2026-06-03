@@ -68,10 +68,8 @@ function makeFakeDb() {
             if (room.topics.get(name) === cb) room.topics.delete(name);
           };
         },
-        // Powers the directory-heartbeat gating in the SDK — visitor-rooms
-        // subscribes here and starts the PUT loop only when a peer with
-        // `kind === "host"` shows up. Test default: no host present, so
-        // the gated heartbeat stays silent.
+        // Retained for room-API completeness; the directory heartbeat no
+        // longer gates on host presence, so visitor-rooms doesn't call this.
         subscribePresence(
           _opts: unknown,
           cb: (slice: {
@@ -389,8 +387,6 @@ describe("createLobbysideIncomingCallClient", () => {
     const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
     const visitorRoom = ctx.rooms[`widgetVisitors:${WIDGET_ID}:${tabId()}`];
     const counterRoom = ctx.rooms[`widgetVisitorCounter:${WIDGET_ID}:_counter`];
-    const activeHostsRoom =
-      ctx.rooms[`widgetActiveHosts:${WIDGET_ID}:_hosts`];
     expect(inviteRoom.topics.size).toBe(2);
 
     ctx.client.destroy();
@@ -398,11 +394,9 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(inviteRoom.topics.size).toBe(0);
     expect(inviteRoom.leftRoom).toBe(true);
     expect(visitorRoom.leftRoom).toBe(true);
-    // Counter + active-hosts rooms are joined for their side effects
-    // (pill count, heartbeat gating). Both must be left on destroy
-    // otherwise the SDK consumer keeps a phantom presence after unmount.
+    // Counter room is joined for its side effect (pill count); it must be
+    // left on destroy or the SDK consumer keeps a phantom presence.
     expect(counterRoom.leftRoom).toBe(true);
-    expect(activeHostsRoom.leftRoom).toBe(true);
   });
 
   it("destroy while ringing declines the active invite (Bugbot regression)", async () => {
@@ -470,10 +464,63 @@ describe("createLobbysideIncomingCallClient", () => {
 
     const inviteRoom = ctx.rooms[`visitorInvites:${tabId()}`];
     expect(inviteRoom.publishedTopics).toEqual([]);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // The directory heartbeat may PUT here — assert only that no decline fired.
+    expect(fetchSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("/decline"),
+      expect.anything(),
+    );
 
     vi.advanceTimersByTime(500);
     expect(ctx.client.getState().status).toBe("ringing");
+  });
+
+  // Regression: the directory heartbeat must PUT unconditionally (no host-gate)
+  // with the rich body, or SDK rows show up with no journey/path (or not at all).
+  it("PUTs an ungated rich heartbeat carrying path + journey", async () => {
+    const ctx = await bootClient({ visitor: { name: "Ada" } });
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Advance past the anti-stampede jitter window (max 2s).
+    vi.advanceTimersByTime(2000);
+
+    const put = fetchSpy.mock.calls.find(
+      ([url, init]) =>
+        typeof url === "string" &&
+        url.includes(`/live-tabs/${tabId()}`) &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    const body = JSON.parse((put![1] as RequestInit).body as string);
+    expect(body.pathname).toBe("/");
+    expect(Array.isArray(body.visitedPaths)).toBe(true);
+    expect(body.visitedPaths.length).toBeGreaterThan(0);
+    expect(body.visitorName).toBe("Ada");
+  });
+
+  // Regression (Bugbot): setVisitor must refresh the polled directory row, not
+  // just the per-tab room, or the host's Live list shows a stale name/email.
+  it("setVisitor re-PUTs the heartbeat with updated identity", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Let the initial jittered PUT fire so the row exists.
+    vi.advanceTimersByTime(2000);
+    fetchSpy.mockClear();
+
+    ctx.client.setVisitor({ name: "Bob", email: "bob@acme.com" });
+
+    const put = fetchSpy.mock.calls.find(
+      ([url, init]) =>
+        typeof url === "string" &&
+        url.includes(`/live-tabs/${tabId()}`) &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    const body = JSON.parse((put![1] as RequestInit).body as string);
+    expect(body.visitorName).toBe("Bob");
+    expect(body.visitorEmail).toBe("bob@acme.com");
   });
 
   it("invite missing sentAt falls back to Date.now() (Bugbot regression)", async () => {

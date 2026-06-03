@@ -12,18 +12,11 @@
 //      `052aee1` series).
 //
 //   2. `widgetVisitorCounter:${widgetId}:_counter` — shared, only `kind`
-//      and `origin`. Powers the host's "N visitors live" pill across the
-//      dashboard. Carrying no PII means no leak through this back door.
+//      and `origin`. Carrying no PII means no leak through this back door.
 //
-//   3. `widgetActiveHosts:${widgetId}:_hosts` — shared, presence-only.
-//      The visitor SUBSCRIBES (no publish); the host PUBLISHES with
-//      `kind: "host"`. Used as a gate for the directory heartbeat so we
-//      don't PUT to `/live-tabs/${tabId}` when no host is looking.
-//
-// Renaming any suffix here needs the matching rename on the host side
-// (`use-live-visitors.ts`, `use-visitor-counter.ts`,
-// `use-host-presence-broadcast.ts`) — otherwise host and visitor land in
-// different rooms and the pill / Live table go silent.
+// The directory heartbeat (PUT /live-tabs/${tabId}) runs unconditionally and
+// carries the rich visitor body (path, journey, identity), mirroring the
+// script-tag reporter; the host reads the rows by polling, so there is no gate.
 
 const DIRECTORY_HEARTBEAT_MS = 30_000;
 // Anti-stampede: spread the initial PUTs of N concurrent visitors over a
@@ -34,7 +27,6 @@ const DIRECTORY_HEARTBEAT_MS = 30_000;
 const INITIAL_JITTER_MS = 2_000;
 
 const COUNTER_ROOM_ID_SUFFIX = ":_counter";
-const ACTIVE_HOSTS_ROOM_ID_SUFFIX = ":_hosts";
 
 // Loose subset of @instantdb/core's Room API. We type only what the SDK
 // actually uses so a future @instantdb/core minor bump that adds methods
@@ -54,91 +46,29 @@ export interface RoomCapableDb {
   ): InstantRoom;
 }
 
-// `subscribePresence` is not on the publicly-typed Room surface, but
-// every actual room handle has it at runtime. Cast at the single point
-// where we need it (`attachActiveHostsListener`) rather than widening
-// `InstantRoom`.
-type SubscribePresenceArg = (slice: {
-  peers?: Record<string, Record<string, unknown>>;
-}) => void;
-
-interface RoomWithSubscribePresence extends InstantRoom {
-  subscribePresence(opts: unknown, cb: SubscribePresenceArg): () => void;
-}
-
-function hostPresentIn(
-  peers: Record<string, Record<string, unknown>> | undefined,
-): boolean {
-  if (!peers) return false;
-  for (const p of Object.values(peers)) {
-    if (p && (p as { kind?: unknown }).kind === "host") return true;
-  }
-  return false;
-}
-
-function attachActiveHostsListener(
-  db: RoomCapableDb,
-  widgetId: string,
-  onChange: (hostPresent: boolean) => void,
-): { room: InstantRoom | null; unsub: (() => void) | null } {
-  // Pure-subscriber join: we don't `publish` here, so our peer is
-  // ignored by the `kind === "host"` filter on the receiving side.
-  let room: InstantRoom;
-  try {
-    room = db.joinRoom(
-      "widgetActiveHosts",
-      `${widgetId}${ACTIVE_HOSTS_ROOM_ID_SUFFIX}`,
-      { initialPresence: {} },
-    );
-  } catch {
-    // Join failure: gate stays closed. The widget keeps working (per-tab
-    // room, invites) but doesn't appear in the host's Live table. Better
-    // than flooding the endpoint from clients we can't observe.
-    return { room: null, unsub: null };
-  }
-
-  try {
-    const unsub = (
-      room as unknown as RoomWithSubscribePresence
-    ).subscribePresence({ keys: ["kind"] }, (slice) => {
-      onChange(hostPresentIn(slice.peers));
-    });
-    return { room, unsub };
-  } catch {
-    // subscribePresence failed AFTER joinRoom succeeded — clean up the
-    // room we successfully joined to avoid leaking the presence entry
-    // and WebSocket resources. Without this, every subscribe failure
-    // would leave a phantom peer in the active-hosts room until the
-    // tab closes.
-    try {
-      room.leaveRoom();
-    } catch {
-      // best-effort
-    }
-    return { room: null, unsub: null };
-  }
-}
-
 interface HeartbeatHandle {
+  // Merge a diff into the heartbeat body (e.g. identity from setVisitor) so the
+  // polled Live row stays current, then re-PUT if the row already exists.
+  update: (diff: Record<string, unknown>) => void;
   stop: () => void;
   releaseOnUnload: () => void;
 }
 
-function startGatedDirectoryHeartbeat(args: {
-  db: RoomCapableDb;
+// Reports this tab's presence as a server row on an interval, carrying the rich
+// visitor body so the host's Live table shows path + journey + identity.
+function startDirectoryHeartbeat(args: {
   baseUrl: string;
   widgetId: string;
   tabId: string;
-  // When `false`, the heartbeat appends `?ice=0` so the server-side row
-  // gets `incomingCallsEnabled: false`. The outbound-call route reads
-  // this row and refuses to dial tabs that opted out (the host UI also
-  // disables the Call button via presence — this is the belt-and-braces
-  // server guard for the case where a stale UI tries anyway).
-  // Default is `true` (omit the query) for backward compatibility with
-  // the script-tag bundle and existing SDK consumers.
+  // Rich heartbeat payload (origin, pathname, visitedPaths, identity); the
+  // server backfills geo from edge headers. Sanitized server-side.
+  body: Record<string, unknown>;
+  // When `false`, append `?ice=0` so the row records incoming calls disabled.
   incomingCallsEnabled?: boolean;
 }): HeartbeatHandle {
-  const { db, baseUrl, widgetId, tabId, incomingCallsEnabled } = args;
+  const { baseUrl, widgetId, tabId, incomingCallsEnabled } = args;
+  // Copy so later `update`s don't mutate the caller's presence object.
+  const body: Record<string, unknown> = { ...args.body };
   const baseHeartbeatUrl = `${baseUrl}/api/widget/${encodeURIComponent(
     widgetId,
   )}/live-tabs/${encodeURIComponent(tabId)}`;
@@ -149,32 +79,29 @@ function startGatedDirectoryHeartbeat(args: {
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let jitterTimer: ReturnType<typeof setTimeout> | null = null;
-  // Tracks whether the server has a row for us. Drives release(): if we
-  // never PUT, the DELETE on host-leave / pagehide / destroy is a wasted
-  // request, so we skip it.
+  // Drives release(): if we never PUT, the DELETE is a wasted request.
   let hasFiredAny = false;
-  let activeHostsRoom: InstantRoom | null = null;
-  let unsubActiveHosts: (() => void) | null = null;
 
   function ping(): void {
     if (typeof fetch !== "function") return;
     try {
-      fetch(url, { method: "PUT", keepalive: true }).catch(() => {
+      fetch(url, {
+        method: "PUT",
+        keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {
         // Silent: the host re-checks freshness on the next heartbeat.
       });
     } catch {
-      // Sandboxed iframe with fetch disabled / ancient envs: accept the
-      // row will TTL out client-side on the host.
+      // Sandboxed iframe with fetch disabled — host's stale-row filter copes.
     }
   }
 
   function release(): void {
     if (!hasFiredAny) return;
     if (typeof fetch !== "function") return;
-    // `keepalive: true` lets the DELETE survive `pagehide`. sendBeacon
-    // would also work but is POST-only and this route uses method
-    // semantics. The host's grace window is the safety net if neither
-    // path lands.
+    // `keepalive: true` lets the DELETE survive `pagehide`.
     try {
       fetch(url, { method: "DELETE", keepalive: true }).catch(() => {});
     } catch {
@@ -182,9 +109,19 @@ function startGatedDirectoryHeartbeat(args: {
     }
   }
 
-  function startHeartbeat(): void {
-    if (timer !== null || jitterTimer !== null) return; // already armed
-    if (typeof window === "undefined") return;
+  function stopTimers(): void {
+    if (jitterTimer !== null) {
+      clearTimeout(jitterTimer);
+      jitterTimer = null;
+    }
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    // Anti-stampede jitter on the first PUT; steady cadence thereafter.
     const initialDelayMs = Math.floor(Math.random() * INITIAL_JITTER_MS);
     jitterTimer = setTimeout(() => {
       jitterTimer = null;
@@ -194,48 +131,21 @@ function startGatedDirectoryHeartbeat(args: {
     }, initialDelayMs);
   }
 
-  function stopHeartbeat(opts: { releaseRow: boolean }): void {
-    if (jitterTimer !== null) {
-      clearTimeout(jitterTimer);
-      jitterTimer = null;
-    }
-    if (timer !== null) {
-      clearInterval(timer);
-      timer = null;
-    }
-    if (opts.releaseRow && hasFiredAny) {
-      release();
-      hasFiredAny = false;
-    }
-  }
-
-  const attached = attachActiveHostsListener(db, widgetId, (present) => {
-    if (present) startHeartbeat();
-    else stopHeartbeat({ releaseRow: true });
-  });
-  activeHostsRoom = attached.room;
-  unsubActiveHosts = attached.unsub;
-
   const onPageHide = () => release();
   if (typeof window !== "undefined") {
     window.addEventListener("pagehide", onPageHide);
   }
 
   return {
+    update: (diff) => {
+      Object.assign(body, diff);
+      // Pending jittered ping already serializes `body`; only re-PUT once the
+      // row exists so an update can't beat the first PUT into existence.
+      if (hasFiredAny) ping();
+    },
     stop: () => {
-      // Don't release here — `destroy()` in the bundle calls
-      // releaseOnUnload right after, so this would double-DELETE.
-      stopHeartbeat({ releaseRow: false });
-      try {
-        unsubActiveHosts?.();
-      } catch {
-        // best-effort
-      }
-      try {
-        activeHostsRoom?.leaveRoom();
-      } catch {
-        // best-effort
-      }
+      // Don't release here — `destroy()` calls releaseOnUnload right after.
+      stopTimers();
       if (typeof window !== "undefined") {
         window.removeEventListener("pagehide", onPageHide);
       }
@@ -291,9 +201,8 @@ export interface AttachVisitorRoomsArgs {
   tabId: string;
   initialPresence: Record<string, unknown>;
   origin: string;
-  // Forwarded into the per-tab presence record AND the directory
-  // heartbeat URL (`?ice=0`) when `false`. Default `true`. See
-  // `startGatedDirectoryHeartbeat` for the server-guard rationale.
+  // Forwarded into the per-tab presence record AND the directory heartbeat
+  // URL (`?ice=0`) when `false`. Default `true`.
   incomingCallsEnabled?: boolean;
 }
 
@@ -310,10 +219,15 @@ export interface VisitorRoomBundle {
    */
   counterRoom: InstantRoom | null;
   /**
+   * Merge a diff (e.g. identity from `setVisitor`) into the directory
+   * heartbeat body so the host's polled Live row reflects it, not just the
+   * per-tab room.
+   */
+  updateHeartbeat: (diff: Record<string, unknown>) => void;
+  /**
    * Tear everything down. Idempotent. Combines `stop` (clear heartbeat
-   * timers, unsubscribe `widgetActiveHosts`) + `releaseOnUnload` (DELETE
-   * the directory row if we ever PUT) + leaving the visitor / counter
-   * rooms.
+   * timers) + `releaseOnUnload` (DELETE the directory row if we ever PUT)
+   * + leaving the visitor / counter rooms.
    */
   destroy: () => void;
 }
@@ -324,11 +238,9 @@ export interface VisitorRoomBundle {
  * navigation tracker — that's targeting-filter machinery the headless
  * SDK doesn't need yet).
  *
- * Order matters: visitor room first (so the host's per-tab subscription
- * has someone to discover), counter room (so the pill increments), then
- * the gated heartbeat. The heartbeat is silent until a host shows up in
- * `widgetActiveHosts`, at which point it PUTs the directory row and
- * keeps it fresh.
+ * Order: visitor room first (so the host's per-tab subscription has
+ * someone to discover), counter room, then the directory heartbeat —
+ * which PUTs the rich row immediately and keeps it fresh, ungated.
  */
 export function attachVisitorRooms(
   args: AttachVisitorRoomsArgs,
@@ -349,11 +261,11 @@ export function attachVisitorRooms(
     initialPresence,
   );
   const counterRoom = joinCounterRoom(args.db, args.widgetId, args.origin);
-  const heartbeat = startGatedDirectoryHeartbeat({
-    db: args.db,
+  const heartbeat = startDirectoryHeartbeat({
     baseUrl: args.baseUrl,
     widgetId: args.widgetId,
     tabId: args.tabId,
+    body: args.initialPresence,
     incomingCallsEnabled,
   });
 
@@ -377,5 +289,10 @@ export function attachVisitorRooms(
     } catch {}
   }
 
-  return { visitorRoom, counterRoom, destroy };
+  return {
+    visitorRoom,
+    counterRoom,
+    updateHeartbeat: (diff) => heartbeat.update(diff),
+    destroy,
+  };
 }
