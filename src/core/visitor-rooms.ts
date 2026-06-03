@@ -47,6 +47,9 @@ export interface RoomCapableDb {
 }
 
 interface HeartbeatHandle {
+  // Merge a diff into the heartbeat body (e.g. identity from setVisitor) so the
+  // polled Live row stays current, then re-PUT if the row already exists.
+  update: (diff: Record<string, unknown>) => void;
   stop: () => void;
   releaseOnUnload: () => void;
 }
@@ -63,7 +66,9 @@ function startDirectoryHeartbeat(args: {
   // When `false`, append `?ice=0` so the row records incoming calls disabled.
   incomingCallsEnabled?: boolean;
 }): HeartbeatHandle {
-  const { baseUrl, widgetId, tabId, body, incomingCallsEnabled } = args;
+  const { baseUrl, widgetId, tabId, incomingCallsEnabled } = args;
+  // Copy so later `update`s don't mutate the caller's presence object.
+  const body: Record<string, unknown> = { ...args.body };
   const baseHeartbeatUrl = `${baseUrl}/api/widget/${encodeURIComponent(
     widgetId,
   )}/live-tabs/${encodeURIComponent(tabId)}`;
@@ -132,6 +137,12 @@ function startDirectoryHeartbeat(args: {
   }
 
   return {
+    update: (diff) => {
+      Object.assign(body, diff);
+      // Pending jittered ping already serializes `body`; only re-PUT once the
+      // row exists so an update can't beat the first PUT into existence.
+      if (hasFiredAny) ping();
+    },
     stop: () => {
       // Don't release here — `destroy()` calls releaseOnUnload right after.
       stopTimers();
@@ -190,9 +201,8 @@ export interface AttachVisitorRoomsArgs {
   tabId: string;
   initialPresence: Record<string, unknown>;
   origin: string;
-  // Forwarded into the per-tab presence record AND the directory
-  // heartbeat URL (`?ice=0`) when `false`. Default `true`. See
-  // `startGatedDirectoryHeartbeat` for the server-guard rationale.
+  // Forwarded into the per-tab presence record AND the directory heartbeat
+  // URL (`?ice=0`) when `false`. Default `true`.
   incomingCallsEnabled?: boolean;
 }
 
@@ -208,6 +218,12 @@ export interface VisitorRoomBundle {
    * host's pill count).
    */
   counterRoom: InstantRoom | null;
+  /**
+   * Merge a diff (e.g. identity from `setVisitor`) into the directory
+   * heartbeat body so the host's polled Live row reflects it, not just the
+   * per-tab room.
+   */
+  updateHeartbeat: (diff: Record<string, unknown>) => void;
   /**
    * Tear everything down. Idempotent. Combines `stop` (clear heartbeat
    * timers) + `releaseOnUnload` (DELETE the directory row if we ever PUT)
@@ -273,5 +289,10 @@ export function attachVisitorRooms(
     } catch {}
   }
 
-  return { visitorRoom, counterRoom, destroy };
+  return {
+    visitorRoom,
+    counterRoom,
+    updateHeartbeat: (diff) => heartbeat.update(diff),
+    destroy,
+  };
 }

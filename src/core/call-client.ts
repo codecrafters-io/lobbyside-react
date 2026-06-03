@@ -334,13 +334,16 @@ export function createLobbysideIncomingCallClient(
     },
     setVisitor(next) {
       visitor = next;
+      const update: Record<string, unknown> = {
+        visitorName: next?.name ?? "",
+        visitorEmail: next?.email ?? "",
+      };
+      try {
+        visitorRoomBundle?.updateHeartbeat(update);
+      } catch {}
       const visitorRoom = visitorRoomBundle?.visitorRoom;
       if (!visitorRoom) return;
       try {
-        const update: Record<string, unknown> = {
-          visitorName: next?.name ?? "",
-          visitorEmail: next?.email ?? "",
-        };
         visitorRoom.publishPresence(update);
       } catch {}
     },
@@ -650,13 +653,17 @@ export function createLobbysideOrgIncomingCallClient(
     },
     setVisitor(next) {
       visitor = next;
+      const update: Record<string, unknown> = {
+        visitorName: next?.name ?? "",
+        visitorEmail: next?.email ?? "",
+      };
+      try {
+        visitorRoomBundle?.updateHeartbeat(update);
+      } catch {}
       const visitorRoom = visitorRoomBundle?.visitorRoom;
       if (!visitorRoom) return;
       try {
-        visitorRoom.publishPresence({
-          visitorName: next?.name ?? "",
-          visitorEmail: next?.email ?? "",
-        });
+        visitorRoom.publishPresence(update);
       } catch {}
     },
     destroy() {

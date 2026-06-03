@@ -498,6 +498,31 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(body.visitorName).toBe("Ada");
   });
 
+  // Regression (Bugbot): setVisitor must refresh the polled directory row, not
+  // just the per-tab room, or the host's Live list shows a stale name/email.
+  it("setVisitor re-PUTs the heartbeat with updated identity", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Let the initial jittered PUT fire so the row exists.
+    vi.advanceTimersByTime(2000);
+    fetchSpy.mockClear();
+
+    ctx.client.setVisitor({ name: "Bob", email: "bob@acme.com" });
+
+    const put = fetchSpy.mock.calls.find(
+      ([url, init]) =>
+        typeof url === "string" &&
+        url.includes(`/live-tabs/${tabId()}`) &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    const body = JSON.parse((put![1] as RequestInit).body as string);
+    expect(body.visitorName).toBe("Bob");
+    expect(body.visitorEmail).toBe("bob@acme.com");
+  });
+
   it("invite missing sentAt falls back to Date.now() (Bugbot regression)", async () => {
     const ctx = await bootClient();
     const before = Date.now();
