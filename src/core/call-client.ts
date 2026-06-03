@@ -10,6 +10,7 @@ import {
   encodeVisitorPrefillHash,
   type VisitorPrefillData,
 } from "./visitor-prefill";
+import { createPresenceTimeline } from "./visitor-presence-timeline";
 import {
   attachVisitorRooms,
   type InstantRoom,
@@ -79,33 +80,6 @@ export interface LobbysideIncomingCallClient {
 const DEFAULT_BASE_URL = "https://lobbyside.com";
 const DEFAULT_RING_TIMEOUT_MS = 30000;
 
-function buildInitialPresence(
-  tabId: string,
-  visitor: VisitorIdentity | undefined,
-): Record<string, unknown> {
-  const now = Date.now();
-  const path = typeof window !== "undefined" ? window.location.pathname : "/";
-  const title = typeof document !== "undefined" ? document.title : "";
-  const origin = typeof window !== "undefined" ? window.location.hostname : "";
-  const referrer = typeof document !== "undefined" ? document.referrer : "";
-  return {
-    kind: "visitor",
-    origin,
-    tabId,
-    pathname: path,
-    pageTitle: title,
-    pageEnteredAt: now,
-    sessionStartedAt: now,
-    referrer,
-    visitedPaths: [{ path, title, enteredAt: now }],
-    // Always present, even when empty, so `setVisitor` updates stay shape-
-    // compatible with the initial join (`""` and missing both fall back to
-    // anonymous on the host via `visitorLabel`).
-    visitorName: visitor?.name ?? "",
-    visitorEmail: visitor?.email ?? "",
-  };
-}
-
 function isPlainInvitePayload(value: unknown): value is IncomingInvitePayload {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -135,6 +109,7 @@ export function createLobbysideIncomingCallClient(
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const ringTimeoutMs = options.ringTimeoutMs ?? DEFAULT_RING_TIMEOUT_MS;
   const tabId = getOrCreateTabId();
+  const timeline = createPresenceTimeline(tabId);
 
   let state: LobbysideIncomingCallState = { status: "idle" };
   let visitor: VisitorIdentity | undefined = options.visitor;
@@ -274,8 +249,15 @@ export function createLobbysideIncomingCallClient(
       baseUrl,
       widgetId,
       tabId,
-      initialPresence: buildInitialPresence(tabId, visitor),
+      initialPresence: timeline.buildBody(visitor),
       origin,
+    });
+    timeline.trackNavigation((diff) => {
+      try {
+        visitorRoomBundle?.updateHeartbeat(diff);
+      } catch {
+        // best-effort — next heartbeat re-PUTs the latest body anyway.
+      }
     });
     try {
       inviteRoom = db.joinRoom("visitorInvites", tabId, {
@@ -363,6 +345,7 @@ export function createLobbysideIncomingCallClient(
         mirrorDeclineRest(baseUrl, callId, tabId);
       }
       clearRingTimer();
+      timeline.destroy();
       teardownRooms();
       listeners.clear();
     },
@@ -397,6 +380,7 @@ export function createLobbysideOrgIncomingCallClient(
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const ringTimeoutMs = options.ringTimeoutMs ?? DEFAULT_RING_TIMEOUT_MS;
   const tabId = getOrCreateTabId();
+  const timeline = createPresenceTimeline(tabId);
 
   let state: LobbysideIncomingCallState = { status: "idle" };
   let visitor: VisitorIdentity | undefined = options.visitor;
@@ -544,7 +528,7 @@ export function createLobbysideOrgIncomingCallClient(
       baseUrl,
       widgetId,
       tabId,
-      initialPresence: buildInitialPresence(tabId, visitor),
+      initialPresence: timeline.buildBody(visitor),
       origin,
     });
   }
@@ -602,6 +586,14 @@ export function createLobbysideOrgIncomingCallClient(
       if (destroyed) return;
       db = getInstantClient(config.instantAppId) as unknown as RoomCapableDb;
       attachInviteRoom();
+      timeline.trackNavigation((diff) => {
+        try {
+          visitorRoomBundle?.updateHeartbeat(diff);
+        } catch {
+          // best-effort — bundle is null between active widgets; the journey
+          // still accumulates and rides the next attach's body.
+        }
+      });
       // Initial active selection from the HTTP snapshot — the live
       // subscription below will refine it as soon as the first tick
       // lands.
@@ -683,6 +675,7 @@ export function createLobbysideOrgIncomingCallClient(
         unsubOrg?.();
       } catch {}
       unsubOrg = null;
+      timeline.destroy();
       detachVisitorRooms();
       teardownInviteRoom();
       listeners.clear();

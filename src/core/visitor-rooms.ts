@@ -234,9 +234,9 @@ export interface VisitorRoomBundle {
 
 /**
  * Mount the full visitor-presence stack for a single widget. Mirrors
- * what the script-tag bundle does in `startVisitorPresence` (minus the
- * navigation tracker — that's targeting-filter machinery the headless
- * SDK doesn't need yet).
+ * what the script-tag bundle does in `startVisitorPresence`; the caller
+ * owns navigation tracking (see `visitor-presence-timeline`) and feeds
+ * journey updates in via `updateHeartbeat`.
  *
  * Order: visitor room first (so the host's per-tab subscription has
  * someone to discover), counter room, then the directory heartbeat —
