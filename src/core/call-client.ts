@@ -79,11 +79,15 @@ export interface LobbysideIncomingCallClient {
 const DEFAULT_BASE_URL = "https://lobbyside.com";
 const DEFAULT_RING_TIMEOUT_MS = 30000;
 
+// `startedAt` is the tab's presence timeline anchor, captured once when the
+// client is created. Org mode rebinds the bundle on every active-widget change;
+// passing the original anchor keeps the host's "on site"/"on page" honest
+// instead of resetting every visitor to 0s the moment a host goes live.
 function buildInitialPresence(
   tabId: string,
   visitor: VisitorIdentity | undefined,
+  startedAt: number,
 ): Record<string, unknown> {
-  const now = Date.now();
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
   const title = typeof document !== "undefined" ? document.title : "";
   const origin = typeof window !== "undefined" ? window.location.hostname : "";
@@ -94,10 +98,10 @@ function buildInitialPresence(
     tabId,
     pathname: path,
     pageTitle: title,
-    pageEnteredAt: now,
-    sessionStartedAt: now,
+    pageEnteredAt: startedAt,
+    sessionStartedAt: startedAt,
     referrer,
-    visitedPaths: [{ path, title, enteredAt: now }],
+    visitedPaths: [{ path, title, enteredAt: startedAt }],
     // Always present, even when empty, so `setVisitor` updates stay shape-
     // compatible with the initial join (`""` and missing both fall back to
     // anonymous on the host via `visitorLabel`).
@@ -135,6 +139,7 @@ export function createLobbysideIncomingCallClient(
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const ringTimeoutMs = options.ringTimeoutMs ?? DEFAULT_RING_TIMEOUT_MS;
   const tabId = getOrCreateTabId();
+  const presenceStartedAt = Date.now();
 
   let state: LobbysideIncomingCallState = { status: "idle" };
   let visitor: VisitorIdentity | undefined = options.visitor;
@@ -274,7 +279,7 @@ export function createLobbysideIncomingCallClient(
       baseUrl,
       widgetId,
       tabId,
-      initialPresence: buildInitialPresence(tabId, visitor),
+      initialPresence: buildInitialPresence(tabId, visitor, presenceStartedAt),
       origin,
     });
     try {
@@ -397,6 +402,7 @@ export function createLobbysideOrgIncomingCallClient(
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const ringTimeoutMs = options.ringTimeoutMs ?? DEFAULT_RING_TIMEOUT_MS;
   const tabId = getOrCreateTabId();
+  const presenceStartedAt = Date.now();
 
   let state: LobbysideIncomingCallState = { status: "idle" };
   let visitor: VisitorIdentity | undefined = options.visitor;
@@ -544,7 +550,7 @@ export function createLobbysideOrgIncomingCallClient(
       baseUrl,
       widgetId,
       tabId,
-      initialPresence: buildInitialPresence(tabId, visitor),
+      initialPresence: buildInitialPresence(tabId, visitor, presenceStartedAt),
       origin,
     });
   }

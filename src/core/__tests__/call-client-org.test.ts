@@ -40,9 +40,10 @@ interface SubscribeCall {
 function makeFakeDb() {
   const rooms: Record<string, FakeRoom> = {};
   const subscribes: SubscribeCall[] = [];
+  const calls: { type: string; id: string; initialPresence: unknown }[] = [];
 
   const db = {
-    joinRoom(type: string, id: string) {
+    joinRoom(type: string, id: string, opts: { initialPresence?: unknown }) {
       const room: FakeRoom = {
         topics: new Map(),
         presenceSubscribers: [],
@@ -51,6 +52,7 @@ function makeFakeDb() {
         leftRoom: false,
       };
       rooms[`${type}:${id}`] = room;
+      calls.push({ type, id, initialPresence: opts?.initialPresence });
       return {
         subscribeTopic(name: string, cb: (event: unknown) => void) {
           room.topics.set(name, cb);
@@ -93,7 +95,7 @@ function makeFakeDb() {
     },
   };
 
-  return { db, rooms, subscribes };
+  return { db, rooms, subscribes, calls };
 }
 
 async function flush() {
@@ -231,6 +233,74 @@ describe("createLobbysideOrgIncomingCallClient", () => {
     expect(roomA.leftRoom).toBe(true);
     expect(rooms[`widgetVisitors:w-B:${tabId()}`]).toBeDefined();
     expect(rooms[`widgetVisitors:w-B:${tabId()}`].leftRoom).toBe(false);
+  });
+
+  // Regression: a host going live re-binds every org visitor to the now-active
+  // widget. The rebind must reuse the visitor's original session/page
+  // timestamps, not reset them to "now" — otherwise the host's Live list shows
+  // every long-tenured visitor as freshly-arrived (0s on site / 0s on page).
+  it("preserves the visitor's session timeline across an active-widget rebind", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-03T00:00:00Z"));
+    try {
+      const { db, subscribes, calls } = makeFakeDb();
+      (fetchOrgConfig as Mock).mockResolvedValue({
+        instantAppId: APP_ID,
+        widgets: [
+          {
+            widgetId: "w-A",
+            slug: "ada",
+            widgetName: "Ada",
+            active: true,
+            displayData: displayData(),
+          },
+          {
+            widgetId: "w-B",
+            slug: "bob",
+            widgetName: "Bob",
+            active: false,
+            displayData: displayData(),
+          },
+        ],
+      });
+      (getInstantClient as Mock).mockReturnValue(db);
+
+      createLobbysideOrgIncomingCallClient(ORG_ID, {
+        baseUrl: "http://localhost:3000",
+      });
+      await flush();
+
+      const presenceA = calls.find(
+        (c) => c.type === "widgetVisitors" && c.id === `w-A:${tabId()}`,
+      )?.initialPresence as Record<string, unknown>;
+      const sessionStartedAt = presenceA.sessionStartedAt as number;
+      const pageEnteredAt = presenceA.pageEnteredAt as number;
+
+      // Visitor keeps browsing for a minute before the host goes live on w-B.
+      vi.advanceTimersByTime(60_000);
+
+      subscribes[0].callback({
+        data: {
+          organizations: [
+            {
+              id: ORG_ID,
+              widgets: [
+                { id: "w-A", widgetConfig: [{ isActive: false }], queueEntries: [] },
+                { id: "w-B", widgetConfig: [{ isActive: true }], queueEntries: [] },
+              ],
+            },
+          ],
+        },
+      });
+
+      const presenceB = calls.find(
+        (c) => c.type === "widgetVisitors" && c.id === `w-B:${tabId()}`,
+      )?.initialPresence as Record<string, unknown>;
+      expect(presenceB.sessionStartedAt).toBe(sessionStartedAt);
+      expect(presenceB.pageEnteredAt).toBe(pageEnteredAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rings when an invite arrives for the currently-active widget", async () => {
