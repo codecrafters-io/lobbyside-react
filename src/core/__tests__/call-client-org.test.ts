@@ -298,7 +298,75 @@ describe("createLobbysideOrgIncomingCallClient", () => {
       )?.initialPresence as Record<string, unknown>;
       expect(presenceB.sessionStartedAt).toBe(sessionStartedAt);
       expect(presenceB.pageEnteredAt).toBe(pageEnteredAt);
+      // Same row carries the timezone (no "Time zone not shared yet") and the
+      // journey, so the rebound row is a full row, not a freshly-arrived stub.
+      expect(typeof presenceB.timezone).toBe("string");
+      expect((presenceB.timezone as string).length).toBeGreaterThan(0);
+      expect(Array.isArray(presenceB.visitedPaths)).toBe(true);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Going live is the FIRST time an org visitor binds to a widget (presence is
+  // detached while no widget is live). The journey navigated before go-live
+  // must ride into that first attach, not start empty at "/".
+  it("carries a journey navigated before go-live into the first attach", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-03T00:00:00Z"));
+    let client: ReturnType<typeof createLobbysideOrgIncomingCallClient> | null =
+      null;
+    try {
+      const { db, subscribes, calls } = makeFakeDb();
+      (fetchOrgConfig as Mock).mockResolvedValue({
+        instantAppId: APP_ID,
+        widgets: [
+          {
+            widgetId: "w-A",
+            slug: "ada",
+            widgetName: "Ada",
+            active: false,
+            displayData: displayData(),
+          },
+        ],
+      });
+      (getInstantClient as Mock).mockReturnValue(db);
+
+      client = createLobbysideOrgIncomingCallClient(ORG_ID, {
+        baseUrl: "http://localhost:3000",
+      });
+      await flush();
+      // No widget live yet → no presence bundle attached.
+      expect(
+        calls.find((c) => c.type === "widgetVisitors"),
+      ).toBeUndefined();
+
+      window.history.pushState({}, "", "/pricing");
+      await Promise.resolve();
+      vi.advanceTimersByTime(400);
+
+      subscribes[0].callback({
+        data: {
+          organizations: [
+            {
+              id: ORG_ID,
+              widgets: [
+                { id: "w-A", widgetConfig: [{ isActive: true }], queueEntries: [] },
+              ],
+            },
+          ],
+        },
+      });
+
+      const presence = calls.find(
+        (c) => c.type === "widgetVisitors" && c.id === `w-A:${tabId()}`,
+      )?.initialPresence as Record<string, unknown>;
+      expect(presence.pathname).toBe("/pricing");
+      const paths = presence.visitedPaths as { path: string }[];
+      expect(paths.some((p) => p.path === "/pricing")).toBe(true);
+    } finally {
+      client?.destroy();
+      window.history.pushState({}, "", "/");
       vi.useRealTimers();
     }
   });

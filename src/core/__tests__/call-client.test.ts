@@ -498,6 +498,60 @@ describe("createLobbysideIncomingCallClient", () => {
     expect(body.visitorName).toBe("Ada");
   });
 
+  // Regression: SDK rows showed "Time zone not shared yet" on the host because
+  // the heartbeat body omitted `timezone` (the script-tag bundle always sends
+  // it). Without it the host can't render the visitor's local time.
+  it("heartbeat body carries a non-empty browser timezone", async () => {
+    await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.advanceTimersByTime(2000);
+
+    const put = fetchSpy.mock.calls.find(
+      ([url, init]) =>
+        typeof url === "string" &&
+        url.includes(`/live-tabs/${tabId()}`) &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    const body = JSON.parse((put![1] as RequestInit).body as string);
+    expect(typeof body.timezone).toBe("string");
+    expect(body.timezone.length).toBeGreaterThan(0);
+  });
+
+  // Regression: SDK rows had a frozen single-entry journey (no nav tracker), so
+  // an SPA visitor browsing several routes still showed "/" with 0s on page.
+  it("SPA navigation appends to the journey and re-PUTs the new path", async () => {
+    const ctx = await bootClient();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // Let the initial jittered PUT fire so the row exists and updates re-PUT.
+    vi.advanceTimersByTime(2000);
+    fetchSpy.mockClear();
+
+    window.history.pushState({}, "", "/pricing");
+    await Promise.resolve();
+    vi.advanceTimersByTime(400);
+
+    const put = [...fetchSpy.mock.calls]
+      .reverse()
+      .find(
+        ([url, init]) =>
+          typeof url === "string" &&
+          url.includes(`/live-tabs/${tabId()}`) &&
+          (init as RequestInit | undefined)?.method === "PUT",
+      );
+    expect(put).toBeDefined();
+    const body = JSON.parse((put![1] as RequestInit).body as string);
+    expect(body.pathname).toBe("/pricing");
+    expect(body.visitedPaths.length).toBe(2);
+    expect(body.visitedPaths[1].path).toBe("/pricing");
+
+    // Restores history.pushState (patched by the nav tracker) for other tests.
+    ctx.client.destroy();
+    window.history.pushState({}, "", "/");
+  });
+
   // Regression (Bugbot): setVisitor must refresh the polled directory row, not
   // just the per-tab room, or the host's Live list shows a stale name/email.
   it("setVisitor re-PUTs the heartbeat with updated identity", async () => {
