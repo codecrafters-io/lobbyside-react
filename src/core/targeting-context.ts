@@ -19,9 +19,10 @@ export interface TargetingContext {
   /** Live snapshot of the path inputs `evaluateTargeting` reads. */
   snapshot(): { currentPath: string; visitedPathnames: string[] };
   /**
-   * Subscribe to the shared nav source; fire `onNavigate` on each real route
-   * change so the caller can re-evaluate targeting. Idempotent — only the
-   * first call attaches. No-op without a DOM. `destroy()` unsubscribes.
+   * Register a callback fired on each real route change so the caller can
+   * re-evaluate targeting. The journey itself is tracked from construction
+   * (not from this call), so visited-page rules match the embed even for hops
+   * that happen before the first cohort evaluation. `destroy()` unsubscribes.
    */
   attach(onNavigate: () => void): void;
   destroy(): void;
@@ -32,7 +33,8 @@ export function createTargetingContext(): TargetingContext {
   let pathname = currentPathname();
   const visited: string[] = [pathname];
 
-  let detach: (() => void) | null = null;
+  let navUnsub: (() => void) | null = null;
+  let notify: (() => void) | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function pushPath(next: string): void {
@@ -53,19 +55,25 @@ export function createTargetingContext(): TargetingContext {
     return { currentPath: pathname, visitedPathnames: [...visited] };
   }
 
+  function handleNav(): void {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      const next = currentPathname();
+      if (next === pathname) return;
+      pushPath(next);
+      notify?.();
+    }, NAV_DEBOUNCE_MS);
+  }
+
+  // Track the journey from construction — not from the first cohort eval — so
+  // route changes during the config-fetch window still land in `visited`.
+  if (typeof window !== "undefined") {
+    navUnsub = subscribeToNavigation(handleNav);
+  }
+
   function attach(onNavigate: () => void): void {
-    if (typeof window === "undefined" || detach) return;
-    const fire = (): void => {
-      if (debounceTimer !== null) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null;
-        const next = currentPathname();
-        if (next === pathname) return;
-        pushPath(next);
-        onNavigate();
-      }, NAV_DEBOUNCE_MS);
-    };
-    detach = subscribeToNavigation(fire);
+    notify = onNavigate;
   }
 
   function destroy(): void {
@@ -73,12 +81,13 @@ export function createTargetingContext(): TargetingContext {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
+    notify = null;
     try {
-      detach?.();
+      navUnsub?.();
     } catch {
       // best-effort
     }
-    detach = null;
+    navUnsub = null;
   }
 
   return {
