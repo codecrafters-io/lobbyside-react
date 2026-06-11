@@ -58,10 +58,11 @@ export function MyCTA() {
 
 ## Return value
 
-`useLobbyside` returns one of four states:
+`useLobbyside` returns one of five states:
 
 - `{ status: 'loading' }` — initial render, before the first HTTP fetch resolves.
 - `{ status: 'error', error: LobbysideError }` — the widget ID doesn't exist (`NOT_FOUND`) or the request failed (`NETWORK`).
+- `{ status: 'hidden' }` — the host's active targeting cohort excludes this visitor (see [Targeting](#targeting-cohorts)). Render nothing — same outcome as the script-tag embed. No identity is surfaced.
 - `{ status: 'offline', ...identity }` — the host has the widget toggled off. Identity fields are still available so you can render "Sarup is offline" with the avatar and host name intact.
 - `{ status: 'online', ...identity, isQueueFull, joinCall }` — live.
 
@@ -118,6 +119,17 @@ await widget.joinCall({
 
 Keys recognized by the server today: `name`, `email`, `company`, `github`. Whatever you pass pre-fills the corresponding fields on the visitor form at `entryUrl`.
 
+
+## Targeting (cohorts)
+
+If the host configures a targeting cohort in the Lobbyside dashboard — show only to certain countries, only after N seconds on the page, or only on certain URLs — the SDK honors it exactly like the script-tag embed. When the visitor doesn't match the active cohort, the hook returns `{ status: 'hidden' }` and you render nothing:
+
+```tsx
+const widget = useLobbyside('YOUR_WIDGET_ID');
+if (widget.status === 'loading' || widget.status === 'hidden') return null;
+```
+
+The match is re-evaluated live: it tracks SPA navigation (so a path-scoped cohort appears/disappears as the visitor moves around), and a session-minimum cohort flips `hidden → online` on its own once enough time has elapsed — no extra wiring on your side. Targeting takes precedence over `offline`, so an excluded visitor sees nothing even when the host is paused. Geo is resolved server-side from the visitor's request; no cohort = shown to everyone (the hook never returns `hidden`). Works in both widget-id and `orgId` modes.
 
 ## Errors
 

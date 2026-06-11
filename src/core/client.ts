@@ -15,6 +15,8 @@ import {
   type OrgSubscribedWidget,
 } from "./org-instant";
 import { LobbysideError } from "./errors";
+import { evaluateTargeting, normalizeTargetingFilters } from "./targeting";
+import { createTargetingContext } from "./targeting-context";
 
 /**
  * Identity + copy fields the host configured. Available on both
@@ -56,6 +58,9 @@ export interface OfflineFallback {
 export type LobbysideWidgetState =
   | { status: "loading" }
   | { status: "error"; error: LobbysideError }
+  // The host's active cohort excludes this visitor (geo / session / path).
+  // Render nothing — same outcome as the script-tag embed's targeting gate.
+  | { status: "hidden" }
   | (WidgetIdentity & OfflineFallback & { status: "offline" })
   | (WidgetIdentity & {
       status: "online";
@@ -76,6 +81,75 @@ export interface CreateClientOptions {
 }
 
 const DEFAULT_BASE_URL = "https://lobbyside.com";
+
+// Shared singleton so useSyncExternalStore sees an `===` snapshot whenever the
+// state stays hidden across recomputes — a fresh object would churn renders.
+const HIDDEN: LobbysideWidgetState = { status: "hidden" };
+
+interface TargetingRuntime {
+  // True when the active cohort excludes this visitor → caller sets HIDDEN.
+  // Arms a re-eval timer internally when blocked only by a session minimum.
+  isHidden(
+    filtersRaw: unknown,
+    geo: { country: string | null } | null,
+  ): boolean;
+  destroy(): void;
+}
+
+// Wraps the journey context + retry timer so both the widget and org clients
+// gate identically — a second hand-rolled copy is exactly the kind of drift
+// this whole change exists to kill.
+function createTargetingRuntime(rerender: () => void): TargetingRuntime {
+  const ctx = createTargetingContext();
+  let attached = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearRetry(): void {
+    if (retryTimer != null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function scheduleRetry(ms?: number): void {
+    clearRetry();
+    if (ms && ms > 0) {
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        rerender();
+      }, ms);
+    }
+  }
+
+  return {
+    isHidden(filtersRaw, geo) {
+      const filters = normalizeTargetingFilters(filtersRaw);
+      if (!filters) {
+        clearRetry();
+        return false;
+      }
+      if (!attached) {
+        ctx.attach(rerender);
+        attached = true;
+      }
+      const { currentPath, visitedPathnames } = ctx.snapshot();
+      const decision = evaluateTargeting({
+        filters,
+        geo,
+        sessionStartedAt: ctx.sessionStartedAt,
+        currentPath,
+        visitedPathnames,
+        now: Date.now(),
+      });
+      scheduleRetry(decision.retryInMs);
+      return !decision.allowed;
+    },
+    destroy() {
+      clearRetry();
+      ctx.destroy();
+    },
+  };
+}
 
 // Shared join-queue POST. Lives at module scope so both the widget-mode
 // and org-mode clients hit identical request shape + error translation.
@@ -142,6 +216,9 @@ export function createLobbysideClient(
 
   let state: LobbysideWidgetState = { status: "loading" };
   let initial: WidgetConfigResponse | null = null;
+  // Visitor geo only arrives on the HTTP snapshot (it's request-derived), so
+  // it's captured once and reused on every targeting re-eval.
+  let geo: { country: string | null } | null = null;
   let liveConfig: ReturnType<typeof normalizeConfig> = undefined;
   // slug is kept in closure — joinCall needs it to build the POST body,
   // but consumers don't need to see it (internal plumbing).
@@ -159,6 +236,11 @@ export function createLobbysideClient(
   function emit() {
     for (const l of listeners) l();
   }
+
+  const targeting = createTargetingRuntime(() => {
+    recompute();
+    emit();
+  });
 
   function recompute() {
     if (state.status === "error") return;
@@ -178,6 +260,13 @@ export function createLobbysideClient(
       ctaText: config.ctaText ?? "",
       buttonText: config.buttonText ?? "",
     };
+
+    // Targeting gates before online/offline — an excluded visitor sees
+    // nothing even when the host is paused, matching the embed's runRender.
+    if (targeting.isHidden(config.targetingFilters, geo)) {
+      state = HIDDEN;
+      return;
+    }
 
     if (!active) {
       const offline: OfflineFallback = {
@@ -225,6 +314,7 @@ export function createLobbysideClient(
     .then((config) => {
       if (destroyed) return;
       initial = config;
+      geo = config.geo ?? null;
       recompute();
       emit();
 
@@ -260,6 +350,7 @@ export function createLobbysideClient(
     },
     destroy() {
       destroyed = true;
+      targeting.destroy();
       unsubscribe?.();
       unsubscribe = null;
       listeners.clear();
@@ -352,6 +443,20 @@ function queuedCountForOrgWidget(
   return live ? countQueuedFor(live) : 0;
 }
 
+function targetingFiltersForOrgWidget(
+  widgetId: string,
+  snapshot: OrgLiveSnapshot,
+): unknown {
+  // Once the live row exists it's the source of truth — including a `null`
+  // that means the host just cleared the cohort, which must override the
+  // (now stale) initial snapshot rather than fall back to it.
+  const live = widgetByIdIn(snapshot.org, widgetId);
+  const liveCfg = normalizeOrgWidgetConfig(live?.widgetConfig);
+  if (liveCfg) return liveCfg.targetingFilters;
+  return entryByIdIn(snapshot.initialWidgets ?? undefined, widgetId)
+    ?.displayData.targetingFilters;
+}
+
 /**
  * Build a Lobbyside client for an org. Renders whichever single widget
  * under the org the host has currently switched on, mirroring the
@@ -367,6 +472,8 @@ export function createLobbysideOrgClient(
 
   let state: LobbysideWidgetState = { status: "loading" };
   const snapshot: OrgLiveSnapshot = { org: null, initialWidgets: null };
+  // Org geo is org-level on the HTTP snapshot, static for the client lifetime.
+  let geo: { country: string | null } | null = null;
   let unsubscribe: (() => void) | null = null;
   let destroyed = false;
   const listeners = new Set<() => void>();
@@ -374,6 +481,11 @@ export function createLobbysideOrgClient(
   function emit() {
     for (const l of listeners) l();
   }
+
+  const targeting = createTargetingRuntime(() => {
+    recompute();
+    emit();
+  });
 
   // Picks the active widget from the live subscription if it's loaded;
   // otherwise falls back to the initial HTTP snapshot. This lets the
@@ -428,6 +540,10 @@ export function createLobbysideOrgClient(
     }
 
     const widgetId = active[0];
+    if (targeting.isHidden(targetingFiltersForOrgWidget(widgetId, snapshot), geo)) {
+      state = HIDDEN;
+      return;
+    }
     const identity = identityForOrgWidget(widgetId, snapshot);
     const queuedCount = queuedCountForOrgWidget(widgetId, snapshot);
     const maxQueueSize = maxQueueSizeForOrgWidget(widgetId, snapshot);
@@ -463,6 +579,7 @@ export function createLobbysideOrgClient(
     .then((config) => {
       if (destroyed) return;
       snapshot.initialWidgets = config.widgets;
+      geo = config.geo ?? null;
       recompute();
       emit();
 
@@ -493,6 +610,7 @@ export function createLobbysideOrgClient(
     },
     destroy() {
       destroyed = true;
+      targeting.destroy();
       unsubscribe?.();
       unsubscribe = null;
       listeners.clear();

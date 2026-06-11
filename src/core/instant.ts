@@ -35,6 +35,8 @@ export interface SubscribedWidgetConfig {
   offlineCtaUrl?: string;
   offlineCtaText?: string;
   offlineButtonText?: string;
+  // Host can flip the active cohort live; surfaced so targeting re-evaluates.
+  targetingFilters?: unknown;
 }
 
 export interface SubscribedWidget {

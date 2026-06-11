@@ -26,6 +26,7 @@ interface OrgSubscribedWidgetConfig {
   customAccentColor?: string | null;
   boldFont?: string | null;
   maxQueueSize?: number;
+  targetingFilters?: unknown;
 }
 
 export interface OrgSubscribedWidget {
