@@ -41,6 +41,8 @@ export interface OrgWidgetEntry {
     offlineCtaUrl?: string;
     offlineCtaText?: string;
     offlineButtonText?: string;
+    // Resolved active-cohort targeting rules (or null = show everyone).
+    targetingFilters?: unknown;
   };
 }
 

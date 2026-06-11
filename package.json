@@ -1,6 +1,6 @@
 {
   "name": "@lobbyside/react",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "React hook for embedding a custom Lobbyside widget UI in your app.",
   "license": "MIT",
   "repository": {

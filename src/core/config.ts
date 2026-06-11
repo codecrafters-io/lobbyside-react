@@ -13,6 +13,9 @@ import { LobbysideError } from "./errors";
 export interface WidgetConfigResponse {
   active: boolean;
   instantAppId: string;
+  // Visitor country (from the server's edge geo) — drives geo targeting.
+  // Request-derived, so it only arrives here, never via the live subscription.
+  geo?: { country: string | null; city: string | null };
   displayData: {
     hostName: string;
     hostTitle: string;
@@ -38,6 +41,8 @@ export interface WidgetConfigResponse {
     offlineCtaUrl?: string;
     offlineCtaText?: string;
     offlineButtonText?: string;
+    // Resolved active-cohort targeting rules (or null = show everyone).
+    targetingFilters?: unknown;
   };
 }
 
