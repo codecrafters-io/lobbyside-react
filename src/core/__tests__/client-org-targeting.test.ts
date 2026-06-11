@@ -143,4 +143,39 @@ describe("createLobbysideOrgClient — targeting", () => {
     });
     expect(client.getState().status).toBe("online");
   });
+
+  it("keeps the initial cohort when a live widgetConfig omits targetingFilters", async () => {
+    const { db, subscribes } = makeFakeDb();
+    (fetchOrgConfig as Mock).mockResolvedValue({
+      instantAppId: APP_ID,
+      geo: { country: "CA", city: null },
+      widgets: [widget({ targetingFilters: US_ONLY })],
+    });
+    (getInstantClient as Mock).mockReturnValue(db);
+
+    const client = createLobbysideOrgClient(ORG_ID);
+    await flush();
+    expect(client.getState().status).toBe("hidden");
+
+    // Live row carries no targetingFilters key (absent, not cleared): the
+    // initial cohort must hold and keep the CA visitor hidden.
+    subscribes[0].callback({
+      data: {
+        organizations: [
+          {
+            id: ORG_ID,
+            widgets: [
+              {
+                id: "w-A",
+                slug: "ada",
+                widgetConfig: [{ isActive: true, hostName: "Ada Ada" }],
+                queueEntries: [],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(client.getState().status).toBe("hidden");
+  });
 });

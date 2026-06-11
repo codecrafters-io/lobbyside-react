@@ -4,6 +4,8 @@
 // `visitor-presence-timeline` (no titles, no heartbeat body) — `useLobbyside`
 // only needs the targeting inputs, not the host-facing Live-tab journey.
 
+import { subscribeToNavigation } from "./history-nav";
+
 const VISITED_PATHS_CAP = 50;
 // SPA route changes fire several history events in a row — coalesce.
 const NAV_DEBOUNCE_MS = 200;
@@ -17,9 +19,9 @@ export interface TargetingContext {
   /** Live snapshot of the path inputs `evaluateTargeting` reads. */
   snapshot(): { currentPath: string; visitedPathnames: string[] };
   /**
-   * Patch history + nav listeners; fire `onNavigate` on each real route
+   * Subscribe to the shared nav source; fire `onNavigate` on each real route
    * change so the caller can re-evaluate targeting. Idempotent — only the
-   * first call attaches. No-op without a DOM. `destroy()` restores originals.
+   * first call attaches. No-op without a DOM. `destroy()` unsubscribes.
    */
   attach(onNavigate: () => void): void;
   destroy(): void;
@@ -63,29 +65,7 @@ export function createTargetingContext(): TargetingContext {
         onNavigate();
       }, NAV_DEBOUNCE_MS);
     };
-    const origPush = history.pushState;
-    const origReplace = history.replaceState;
-    history.pushState = function patchedPush(this: History, ...args) {
-      const ret = origPush.apply(this, args as Parameters<typeof origPush>);
-      queueMicrotask(fire);
-      return ret;
-    };
-    history.replaceState = function patchedReplace(this: History, ...args) {
-      const ret = origReplace.apply(
-        this,
-        args as Parameters<typeof origReplace>,
-      );
-      queueMicrotask(fire);
-      return ret;
-    };
-    window.addEventListener("popstate", fire);
-    window.addEventListener("hashchange", fire);
-    detach = () => {
-      history.pushState = origPush;
-      history.replaceState = origReplace;
-      window.removeEventListener("popstate", fire);
-      window.removeEventListener("hashchange", fire);
-    };
+    detach = subscribeToNavigation(fire);
   }
 
   function destroy(): void {

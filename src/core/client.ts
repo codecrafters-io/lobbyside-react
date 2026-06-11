@@ -86,6 +86,16 @@ const DEFAULT_BASE_URL = "https://lobbyside.com";
 // state stays hidden across recomputes — a fresh object would churn renders.
 const HIDDEN: LobbysideWidgetState = { status: "hidden" };
 
+// A live `null` means the host cleared the cohort and must win over the (now
+// stale) initial snapshot; a live `undefined` means a partial payload never
+// carried the attribute, so fall back to initial rather than drop the cohort.
+function resolveTargetingFiltersRaw(
+  liveValue: unknown,
+  initialValue: unknown,
+): unknown {
+  return liveValue !== undefined ? liveValue : initialValue;
+}
+
 interface TargetingRuntime {
   // True when the active cohort excludes this visitor → caller sets HIDDEN.
   // Arms a re-eval timer internally when blocked only by a session minimum.
@@ -263,7 +273,11 @@ export function createLobbysideClient(
 
     // Targeting gates before online/offline — an excluded visitor sees
     // nothing even when the host is paused, matching the embed's runRender.
-    if (targeting.isHidden(config.targetingFilters, geo)) {
+    const targetingFiltersRaw = resolveTargetingFiltersRaw(
+      liveConfig?.targetingFilters,
+      initial.displayData.targetingFilters,
+    );
+    if (targeting.isHidden(targetingFiltersRaw, geo)) {
       state = HIDDEN;
       return;
     }
@@ -447,14 +461,13 @@ function targetingFiltersForOrgWidget(
   widgetId: string,
   snapshot: OrgLiveSnapshot,
 ): unknown {
-  // Once the live row exists it's the source of truth — including a `null`
-  // that means the host just cleared the cohort, which must override the
-  // (now stale) initial snapshot rather than fall back to it.
   const live = widgetByIdIn(snapshot.org, widgetId);
   const liveCfg = normalizeOrgWidgetConfig(live?.widgetConfig);
-  if (liveCfg) return liveCfg.targetingFilters;
-  return entryByIdIn(snapshot.initialWidgets ?? undefined, widgetId)
-    ?.displayData.targetingFilters;
+  const initialFilters = entryByIdIn(
+    snapshot.initialWidgets ?? undefined,
+    widgetId,
+  )?.displayData.targetingFilters;
+  return resolveTargetingFiltersRaw(liveCfg?.targetingFilters, initialFilters);
 }
 
 /**

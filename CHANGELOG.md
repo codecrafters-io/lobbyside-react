@@ -3,6 +3,7 @@
 ## 0.6.0
 
 - **Targeting / cohorts parity.** Both hooks now honor the host's active targeting cohort (geo country, session minimum, current-page and visited-page globs), matching the script-tag embed. When the visitor is excluded, `useLobbyside` returns a new `{ status: 'hidden' }` state — render nothing. Path-scoped cohorts re-evaluate on SPA navigation, and a session-minimum cohort flips `hidden → online` automatically once enough time has elapsed. Targeting takes precedence over `offline`. No cohort configured = unchanged behavior (the hook never returns `hidden`).
+- Internal: `useLobbyside` and `useLobbysideIncomingCall` now share a single, refcounted SPA-navigation source instead of each patching `history` independently — mounting both hooks on one page no longer risks one's teardown breaking the other's route tracking.
 
 ## 0.5.1
 

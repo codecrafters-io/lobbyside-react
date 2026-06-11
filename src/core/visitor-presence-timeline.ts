@@ -1,3 +1,4 @@
+import { subscribeToNavigation } from "./history-nav";
 import type { VisitorPrefillData } from "./visitor-prefill";
 
 // Mirrors the script-tag bundle's visitor-presence so SDK rows are first-class
@@ -38,8 +39,8 @@ export interface PresenceTimeline {
   // Full heartbeat body for an (re)attach. Reuses the preserved session/page
   // anchors + journey so org rebinds don't reset the visitor's reported tenure.
   buildBody(visitor: VisitorPrefillData | undefined): Record<string, unknown>;
-  // Patches history + nav listeners; emits a heartbeat diff on each real
-  // navigation. Idempotent; `destroy()` restores the originals.
+  // Subscribes to the shared nav source; emits a heartbeat diff on each real
+  // navigation. Idempotent; `destroy()` unsubscribes.
   trackNavigation(onChange: (diff: Record<string, unknown>) => void): void;
   destroy(): void;
 }
@@ -145,26 +146,7 @@ export function createPresenceTimeline(tabId: string): PresenceTimeline {
         recordNavigation(onChange);
       }, NAV_DEBOUNCE_MS);
     };
-    const origPush = history.pushState;
-    const origReplace = history.replaceState;
-    history.pushState = function patchedPush(this: History, ...args) {
-      const ret = origPush.apply(this, args as Parameters<typeof origPush>);
-      queueMicrotask(fire);
-      return ret;
-    };
-    history.replaceState = function patchedReplace(this: History, ...args) {
-      const ret = origReplace.apply(this, args as Parameters<typeof origReplace>);
-      queueMicrotask(fire);
-      return ret;
-    };
-    window.addEventListener("popstate", fire);
-    window.addEventListener("hashchange", fire);
-    detach = () => {
-      history.pushState = origPush;
-      history.replaceState = origReplace;
-      window.removeEventListener("popstate", fire);
-      window.removeEventListener("hashchange", fire);
-    };
+    detach = subscribeToNavigation(fire);
   }
 
   function destroy(): void {

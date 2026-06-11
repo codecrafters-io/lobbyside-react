@@ -125,6 +125,32 @@ describe("createLobbysideClient — targeting", () => {
     client.destroy();
   });
 
+  it("keeps the initial cohort when a live payload omits targetingFilters", async () => {
+    (fetchWidgetConfig as Mock).mockResolvedValue(
+      makeConfig({ active: true, country: "CA", targetingFilters: US_ONLY }),
+    );
+    let push: (w: unknown) => void = () => undefined;
+    (subscribeToWidget as Mock).mockImplementation(
+      (_db: unknown, _id: string, cb: (w: unknown) => void) => {
+        push = cb;
+        return () => undefined;
+      },
+    );
+    const client = createLobbysideClient(WIDGET_ID);
+    await flush();
+    expect(client.getState().status).toBe("hidden");
+
+    // Partial live row (e.g. only the host name changed) — the attribute is
+    // absent, not cleared, so the cohort must survive and keep the CA visitor out.
+    push({
+      slug: "sarup",
+      widgetConfig: { isActive: true, hostName: "Sarup Sarup" },
+      queueEntries: [],
+    });
+    expect(client.getState().status).toBe("hidden");
+    client.destroy();
+  });
+
   it("arms a retry that flips hidden → online once the session minimum elapses", async () => {
     vi.useFakeTimers();
     (fetchWidgetConfig as Mock).mockResolvedValue(
