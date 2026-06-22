@@ -557,6 +557,9 @@ export function createLobbysideOrgIncomingCallClient(
     activeWidgetId = next;
     if (next) {
       attachVisitorRoomsForWidget(next);
+      // Re-check on every activation, not just boot: the live subscription can
+      // name the active widget after the HTTP snapshot left it null/different.
+      reconcilePendingInvite();
     } else {
       detachVisitorRooms();
     }
@@ -615,7 +618,6 @@ export function createLobbysideOrgIncomingCallClient(
       // subscription below will refine it as soon as the first tick
       // lands.
       applyActiveWidget(pickActiveFromInitial(config));
-      reconcilePendingInvite();
       const u = subscribeToOrg(
         getInstantClient(config.instantAppId),
         orgId,

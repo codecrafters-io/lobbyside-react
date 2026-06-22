@@ -48,7 +48,12 @@ const PENDING_INVITE = {
   widgetId: WIDGET_ID,
 };
 
+interface SubscribeCall {
+  callback: (resp: { data: unknown }) => void;
+}
+
 function makeFakeDb() {
+  const subscribes: SubscribeCall[] = [];
   const db = {
     joinRoom() {
       return {
@@ -58,9 +63,27 @@ function makeFakeDb() {
         leaveRoom: () => {},
       };
     },
-    subscribeQuery: () => () => {},
+    subscribeQuery(_q: unknown, callback: (resp: { data: unknown }) => void) {
+      subscribes.push({ callback });
+      return () => {};
+    },
   };
-  return db;
+  return { db, subscribes };
+}
+
+function orgTick(activeWidgetId: string) {
+  return {
+    data: {
+      organizations: [
+        {
+          id: ORG_ID,
+          widgets: [
+            { id: activeWidgetId, widgetConfig: [{ isActive: true }], queueEntries: [] },
+          ],
+        },
+      ],
+    },
+  };
 }
 
 // Routes the boot reconciliation GET to a pending invite; heartbeat PUT/DELETE
@@ -128,7 +151,7 @@ describe("widget-mode boot reconciliation of a mid-ring refresh", () => {
     sessionStorage.clear();
     (fetchWidgetConfig as Mock).mockReset();
     (getInstantClient as Mock).mockReset();
-    (getInstantClient as Mock).mockReturnValue(makeFakeDb());
+    (getInstantClient as Mock).mockReturnValue(makeFakeDb().db);
     (fetchWidgetConfig as Mock).mockResolvedValue({
       active: true,
       instantAppId: APP_ID,
@@ -189,30 +212,27 @@ describe("org-mode boot reconciliation of a mid-ring refresh", () => {
     sessionStorage.clear();
     (fetchOrgConfig as Mock).mockReset();
     (getInstantClient as Mock).mockReset();
-    (getInstantClient as Mock).mockReturnValue(makeFakeDb());
   });
   afterEach(() => {
     while (booted.length > 0) booted.pop()?.destroy();
     vi.unstubAllGlobals();
   });
 
-  function orgConfig(activeWidgetId: string) {
+  function orgConfig(widgets: { widgetId: string; active: boolean }[]) {
     return {
       instantAppId: APP_ID,
-      widgets: [
-        {
-          widgetId: activeWidgetId,
-          slug: "ada",
-          widgetName: "Ada",
-          active: true,
-          displayData: { slug: "ada" },
-        },
-      ],
+      widgets: widgets.map((w) => ({
+        ...w,
+        slug: "ada",
+        widgetName: "Ada",
+        displayData: { slug: "ada" },
+      })),
     };
   }
 
   it("rings when the recovered invite is for the currently-active widget", async () => {
-    (fetchOrgConfig as Mock).mockResolvedValue(orgConfig("w-A"));
+    (getInstantClient as Mock).mockReturnValue(makeFakeDb().db);
+    (fetchOrgConfig as Mock).mockResolvedValue(orgConfig([{ widgetId: "w-A", active: true }]));
     stubRoutedFetch({ ...PENDING_INVITE, widgetId: "w-A" });
     const client = createLobbysideOrgIncomingCallClient(ORG_ID, { baseUrl: BASE_URL });
     booted.push(client);
@@ -221,11 +241,31 @@ describe("org-mode boot reconciliation of a mid-ring refresh", () => {
   });
 
   it("stays idle when the recovered invite is for a non-active widget", async () => {
-    (fetchOrgConfig as Mock).mockResolvedValue(orgConfig("w-A"));
+    (getInstantClient as Mock).mockReturnValue(makeFakeDb().db);
+    (fetchOrgConfig as Mock).mockResolvedValue(orgConfig([{ widgetId: "w-A", active: true }]));
     stubRoutedFetch({ ...PENDING_INVITE, widgetId: "w-B" });
     const client = createLobbysideOrgIncomingCallClient(ORG_ID, { baseUrl: BASE_URL });
     booted.push(client);
     await settle();
     expect(client.getState().status).toBe("idle");
+  });
+
+  // Bugbot regression: snapshot leaves the active widget unresolved (0 live),
+  // so the ring must still recover once the live subscription names it.
+  it("rings when the live subscription resolves the active widget after boot", async () => {
+    const { db, subscribes } = makeFakeDb();
+    (getInstantClient as Mock).mockReturnValue(db);
+    (fetchOrgConfig as Mock).mockResolvedValue(orgConfig([{ widgetId: "w-A", active: false }]));
+    stubRoutedFetch({ ...PENDING_INVITE, widgetId: "w-A" });
+    const client = createLobbysideOrgIncomingCallClient(ORG_ID, { baseUrl: BASE_URL });
+    booted.push(client);
+    await settle();
+    expect(client.getState().status).toBe("idle");
+
+    subscribes[0].callback(orgTick("w-A"));
+    await settle();
+    const state = client.getState();
+    expect(state.status).toBe("ringing");
+    if (state.status === "ringing") expect(state.call.callId).toBe("call-1");
   });
 });
