@@ -6,6 +6,7 @@ import {
   subscribeToOrg,
 } from "./org-instant";
 import { getOrCreateTabId } from "./tab-id";
+import { fetchPendingInvite } from "./pending-invite";
 import {
   encodeVisitorPrefillHash,
   type VisitorPrefillData,
@@ -275,6 +276,11 @@ export function createLobbysideIncomingCallClient(
     try {
       unsubCancelled = inviteRoom.subscribeTopic("cancelled", handleCancelled);
     } catch {}
+    // Recover a ring lost to a mid-ring refresh; idle guard yields to a live topic.
+    void fetchPendingInvite(baseUrl, widgetId, tabId).then((invite) => {
+      if (destroyed || state.status !== "idle" || !invite) return;
+      handleInvite(invite);
+    });
   }
 
   fetchWidgetConfig(widgetId, baseUrl)
@@ -551,6 +557,9 @@ export function createLobbysideOrgIncomingCallClient(
     activeWidgetId = next;
     if (next) {
       attachVisitorRoomsForWidget(next);
+      // Re-check on every activation, not just boot: the live subscription can
+      // name the active widget after the HTTP snapshot left it null/different.
+      reconcilePendingInvite();
     } else {
       detachVisitorRooms();
     }
@@ -579,6 +588,17 @@ export function createLobbysideOrgIncomingCallClient(
   ): string | null {
     const active = config.widgets.filter((w) => w.active);
     return active.length === 1 ? active[0].widgetId : null;
+  }
+
+  // Recover a ring lost to a mid-ring refresh; handleInvite re-checks the
+  // recovered widgetId against the active one, so a stale ring won't show.
+  function reconcilePendingInvite(): void {
+    const wid = activeWidgetId;
+    if (!wid) return;
+    void fetchPendingInvite(baseUrl, wid, tabId).then((invite) => {
+      if (destroyed || state.status !== "idle" || !invite) return;
+      handleInvite(invite);
+    });
   }
 
   fetchOrgConfig(orgId, baseUrl)
